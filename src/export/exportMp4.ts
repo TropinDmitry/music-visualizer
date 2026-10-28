@@ -70,8 +70,8 @@ export async function exportMp4(
 ): Promise<ExportResult> {
   const { width, height, fps, analysis, style, params } = job
 
-  // Холст, который не показывается на странице. OffscreenCanvas есть не во
-  // всех браузерах (🔎 Safari — с 16.4), поэтому есть запасной вариант.
+  // Холст, который не показывается на странице. На случай старого браузера
+  // без OffscreenCanvas — обычный <canvas>, просто не добавленный в документ.
   const canvas =
     typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(width, height) : document.createElement('canvas')
   const visualizer = new Visualizer(canvas, { preserveDrawingBuffer: true })
