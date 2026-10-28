@@ -198,6 +198,7 @@ export function analyzeAudio(
   }
 
   const spectrum = normalizeSpectrum(spectrumDb)
+  smoothSpectrumInPlace(spectrum, spectrumBins, fps, opts.attack, opts.release)
 
   onProgress?.(1)
 
@@ -352,6 +353,17 @@ function normalizeSpectrum(db: Float32Array): Float32Array {
     out[i] = Math.min(1, Math.max(0, (db[i] - bottom) / RANGE_DB))
   }
   return out
+}
+
+/** То же сглаживание огибающей, но для каждого столбика спектра отдельно. */
+function smoothSpectrumInPlace(spectrum: Float32Array, bins: number, fps: number, attackSec: number, releaseSec: number): void {
+  const frameCount = spectrum.length / bins
+  const column = new Float32Array(frameCount)
+  for (let b = 0; b < bins; b++) {
+    for (let f = 0; f < frameCount; f++) column[f] = spectrum[f * bins + b]
+    const smoothed = smoothEnvelope(column, fps, attackSec, releaseSec)
+    for (let f = 0; f < frameCount; f++) spectrum[f * bins + b] = smoothed[f]
+  }
 }
 
 /** Сводит многоканальный звук в моно для анализа. */

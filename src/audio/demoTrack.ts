@@ -7,8 +7,8 @@
 
 export interface DemoTrack {
   sampleRate: number
-  left: Float32Array
-  right: Float32Array
+  left: Float32Array<ArrayBuffer>
+  right: Float32Array<ArrayBuffer>
 }
 
 export function synthesizeDemoTrack(seconds = 12, sampleRate = 44100): DemoTrack {
