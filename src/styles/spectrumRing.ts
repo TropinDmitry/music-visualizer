@@ -184,7 +184,7 @@ function createInstance(): StyleInstance {
       }
       levels.needsUpdate = true
 
-      const rotationSpeed = numberParam(params, 'rotation', 0.5)
+      const rotationSpeed = numberParam(params, 'rotation', 0.25)
       const rotation = (features.time * 0.15 + features.energy * 0.4) * rotationSpeed
       shared.uRotation.value = rotation
       shared.uRadius.value = 0.5 + 0.07 * features.bass * intensity + 0.03 * features.beatPulse
@@ -226,7 +226,7 @@ export const spectrumRing: StyleDefinition = {
   params: [
     { type: 'palette', key: 'palette', label: 'Палитра', default: 'ocean' },
     { type: 'number', key: 'intensity', label: 'Интенсивность', min: 0, max: 2, step: 0.05, default: 1 },
-    { type: 'number', key: 'rotation', label: 'Скорость вращения', min: 0, max: 3, step: 0.05, default: 0.5 },
+    { type: 'number', key: 'rotation', label: 'Скорость вращения', min: 0, max: 3, step: 0.05, default: 0.25 },
     { type: 'number', key: 'barWidth', label: 'Ширина столбиков', min: 0.15, max: 1, step: 0.05, default: 0.6 },
     { type: 'number', key: 'glow', label: 'Свечение', min: 0, max: 2, step: 0.05, default: 1 },
   ],

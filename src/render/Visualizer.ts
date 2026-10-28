@@ -14,7 +14,7 @@ export class Visualizer {
   private readonly renderer: THREE.WebGLRenderer
   private readonly overlay = new TextOverlay()
   private style: StyleInstance | null = null
-  private styleId = ''
+  private styleDefinition: StyleDefinition | null = null
   private width = 1
   private height = 1
 
@@ -34,10 +34,12 @@ export class Visualizer {
   }
 
   setStyle(definition: StyleDefinition): void {
-    if (definition.id === this.styleId) return
+    // Сравниваем сами объекты, а не id: при горячей перезагрузке (HMR) файл
+    // стиля даёт новый объект, и сцена пересоздаётся с новым кодом
+    if (definition === this.styleDefinition) return
     this.style?.dispose()
     this.style = definition.create()
-    this.styleId = definition.id
+    this.styleDefinition = definition
     this.style.resize(this.width, this.height)
   }
 

@@ -102,7 +102,7 @@ const particlesVertex = /* glsl */ `
     // Мерцание от верхних частот: у каждой частицы своя фаза
     vSparkle = 0.5 + 0.5 * sin(uPhase * 20.0 + aSeed * 60.0);
     vec4 viewPosition = modelViewMatrix * vec4(p, 1.0);
-    float size = 2.0 + 5.0 * uTreble * vSparkle;
+    float size = 3.0 + 6.0 * uTreble * vSparkle;
     gl_PointSize = size * uPointScale * (6.0 / -viewPosition.z); // дальние — меньше
     gl_Position = projectionMatrix * viewPosition;
   }
@@ -120,7 +120,7 @@ const particlesFragment = /* glsl */ `
     float d = length(gl_PointCoord - 0.5);
     float alpha = smoothstep(0.5, 0.0, d);
     vec3 color = paletteColor(vSeed);
-    gl_FragColor = vec4(color, alpha * uOpacity * (0.35 + 0.65 * uTreble * vSparkle));
+    gl_FragColor = vec4(color, alpha * uOpacity * (0.5 + 0.5 * uTreble * vSparkle));
   }
 `
 

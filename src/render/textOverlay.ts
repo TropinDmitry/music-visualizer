@@ -19,7 +19,7 @@ export class TextOverlay {
   readonly scene = new THREE.Scene()
   readonly camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
   private readonly canvas: HTMLCanvasElement
-  private readonly texture: THREE.CanvasTexture
+  private texture: THREE.CanvasTexture
   private readonly material: THREE.MeshBasicMaterial
   private readonly quad: THREE.Mesh
   private text: OverlayText = { title: '', artist: '', watermark: false }
@@ -28,9 +28,7 @@ export class TextOverlay {
 
   constructor() {
     this.canvas = document.createElement('canvas')
-    this.texture = new THREE.CanvasTexture(this.canvas)
-    // Цвета холста — уже готовые sRGB, перекодировать их не нужно
-    this.texture.colorSpace = THREE.NoColorSpace
+    this.texture = this.createTexture()
     this.material = new THREE.MeshBasicMaterial({
       map: this.texture,
       transparent: true,
@@ -59,7 +57,19 @@ export class TextOverlay {
     if (width === this.width && height === this.height) return
     this.width = width
     this.height = height
+    // Видеопамять под текстуру выделяется один раз под конкретный размер,
+    // поэтому при новом размере холста создаём новую текстуру
+    this.texture.dispose()
+    this.texture = this.createTexture()
+    this.material.map = this.texture
     this.redraw()
+  }
+
+  private createTexture(): THREE.CanvasTexture {
+    const texture = new THREE.CanvasTexture(this.canvas)
+    // Цвета холста — уже готовые sRGB, перекодировать их не нужно
+    texture.colorSpace = THREE.NoColorSpace
+    return texture
   }
 
   private redraw(): void {

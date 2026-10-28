@@ -46,15 +46,22 @@ const tunnelFragment = /* glsl */ `
                  + sin(v * 1.5 + angle * 2.0);
     plasma *= 0.25; // примерно -1..1
 
+    // Цвет — из палитры, яркость — тоже от плазмы: так появляются тёмные
+    // «провалы» между светлыми пятнами и картинка не пересвечена
     vec3 color = paletteColor(uHue + plasma * 0.5 + v * 0.03);
+    color *= 0.2 + 1.0 * pow(0.5 + 0.5 * plasma, 1.5);
+
+    // Спиральные «рёбра» вдоль стенок — благодаря им читается форма туннеля
+    float ribs = pow(abs(sin(angle * 6.0 + depth * uTwist)), 24.0);
+    color += paletteColor(uHue + 0.33) * ribs * 0.35;
 
     // Светящиеся кольца поперёк туннеля — от верхних частот
     float rings = pow(abs(sin(v * 3.14159)), 40.0);
-    color += paletteColor(uHue + 0.5) * rings * (0.2 + 1.5 * uTreble) * uIntensity;
+    color += paletteColor(uHue + 0.5) * rings * (0.15 + 1.2 * uTreble) * uIntensity;
 
     // Глубина: центр (дальний конец) тёмный, на басу туннель ярче
-    float fog = smoothstep(0.0, 0.7, radius);
-    color *= fog * (0.45 + 0.9 * uBass * uIntensity);
+    float fog = smoothstep(0.05, 0.9, radius);
+    color *= fog * (0.6 + 0.7 * uBass * uIntensity);
 
     // Виньетка по краям кадра
     color *= 1.0 - 0.5 * smoothstep(1.0, 2.0, radius);
