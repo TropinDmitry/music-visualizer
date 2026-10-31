@@ -1,0 +1,44 @@
+/* Базовые стили общие с «Орбитой» (game.css), здесь только своё */
+
+.file-button.is-secondary {
+  border-color: var(--line);
+  color: var(--text);
+  font-weight: 500;
+}
+
+.look-list {
+  flex-wrap: wrap;
+}
+
+.look-list button {
+  flex: 1 1 50%;
+  font-size: 13px;
+}
+
+.shake-prompt {
+  position: absolute;
+  top: 16%;
+  left: 50%;
+  width: min(420px, calc(100% - 32px));
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 16px;
+  border: 1px solid var(--green);
+  border-radius: 12px;
+  background: var(--glass);
+  text-align: center;
+}
+
+.shake-prompt strong {
+  font-size: 26px;
+  letter-spacing: 0.2em;
+  color: var(--green);
+}
+
+.shake-prompt span {
+  font-size: 14px;
+  color: var(--muted);
+}

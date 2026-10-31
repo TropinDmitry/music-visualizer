@@ -131,7 +131,7 @@ function withoutShardsNearPulses(notes: Note[]): Note[] {
  * если рядом ещё нет ноты. Поэтому на лёгкой сложности остаются главные доли,
  * а не первые попавшиеся.
  */
-function pickNoteFrames(analysis: AudioAnalysis, minGapSec: number): number[] {
+export function pickNoteFrames(analysis: AudioAnalysis, minGapSec: number): number[] {
   const candidates: number[] = []
   for (let frame = 0; frame < analysis.frameCount; frame++) {
     const time = frame / analysis.fps
