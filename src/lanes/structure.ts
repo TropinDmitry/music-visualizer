@@ -15,7 +15,7 @@ import { percentile, type AudioAnalysis } from '../audio/analyzer.ts'
  * без резких переходов. Зато не зависит от жанра и работает на любом файле.
  */
 
-export type MomentKind = 'buildup' | 'pause' | 'impact'
+export type MomentKind = 'buildup' | 'pause' | 'impact' | 'sustain'
 
 export interface Moment {
   kind: MomentKind
@@ -43,6 +43,15 @@ const EDGE_SEC = 2
 const PEAK_REACH_SEC = 0.2
 /** Окно усреднения силы части песни: припев длиннее нескольких тактов. */
 const INTENSITY_WINDOW_SEC = 5
+const SUSTAIN_STEP_SEC = 0.25
+const SUSTAIN_WINDOW_SEC = 1.5
+const SUSTAIN_MIN_SEC = 1.5
+/** Меньше какой доли обычного числа ударов место считается протяжным. */
+const SUSTAIN_SPARSE_SHARE = 0.45
+const SUSTAIN_MIN_PRESENCE = 0.22
+/** На сколько столбиков спектра должен подняться тембр, чтобы это был взлёт. */
+const SUSTAIN_RISE_SEC = 1.5
+const SUSTAIN_MIN_RISE = 4
 /** Окно сравнения силы до и после границы части. */
 const SECTION_COMPARE_SEC = 7
 const SECTION_MIN_JUMP = 0.22
@@ -153,6 +162,67 @@ export function findSections(analysis: AudioAnalysis, intensity: Float32Array): 
     sections.push({ start: edges[i] / fps, end: edges[i + 1] / fps, level: mean(edges[i], edges[i + 1]) })
   }
   return sections
+}
+
+/**
+ * Протяжные участки: звук есть, а отдельных ударов мало, либо тембр плавно ползёт
+ * вверх, как взлёт перед дропом. Отдельными нотами такое не сыграть, это работа
+ * для длинных лучей.
+ */
+export function findSustains(analysis: AudioAnalysis): Moment[] {
+  const fps = analysis.fps
+  const stepFrames = Math.round(SUSTAIN_STEP_SEC * fps)
+  const windowFrames = Math.round(SUSTAIN_WINDOW_SEC * fps)
+  const blockCount = Math.floor(analysis.frameCount / stepFrames)
+
+  const onsetCounts = new Float32Array(blockCount)
+  const brightness = new Float32Array(blockCount)
+  const presence = new Float32Array(blockCount)
+  for (let block = 0; block < blockCount; block++) {
+    const from = Math.max(0, block * stepFrames - windowFrames / 2)
+    const to = Math.min(analysis.frameCount, block * stepFrames + windowFrames / 2)
+    let weighted = 0
+    let total = 0
+    let mids = 0
+    for (let frame = from; frame < to; frame++) {
+      onsetCounts[block] += analysis.onsets[frame]
+      mids += analysis.mid[frame] + analysis.treble[frame]
+      const row = frame * analysis.spectrumBins
+      for (let bin = 0; bin < analysis.spectrumBins; bin++) {
+        weighted += bin * analysis.spectrum[row + bin]
+        total += analysis.spectrum[row + bin]
+      }
+    }
+    brightness[block] = total > 0 ? weighted / total : 0
+    presence[block] = mids / Math.max(1, (to - from) * 2)
+  }
+
+  const typicalOnsets = percentile(onsetCounts, 0.5)
+  const riseBlocks = Math.round(SUSTAIN_RISE_SEC / SUSTAIN_STEP_SEC)
+  const isSustained = new Uint8Array(blockCount)
+  for (let block = 0; block < blockCount; block++) {
+    if (presence[block] < SUSTAIN_MIN_PRESENCE) continue
+    const isSparse = onsetCounts[block] <= typicalOnsets * SUSTAIN_SPARSE_SHARE
+    const past = block - riseBlocks
+    const isRising = past >= 0 && brightness[block] - brightness[past] >= SUSTAIN_MIN_RISE
+    if (isSparse || isRising) isSustained[block] = 1
+  }
+
+  const sustains: Moment[] = []
+  let block = 0
+  while (block < blockCount) {
+    if (!isSustained[block]) {
+      block += 1
+      continue
+    }
+    let end = block
+    while (end + 1 < blockCount && isSustained[end + 1]) end += 1
+    const start = (block * stepFrames) / fps
+    const stop = ((end + 1) * stepFrames) / fps
+    if (stop - start >= SUSTAIN_MIN_SEC) sustains.push({ kind: 'sustain', start, end: stop })
+    block = end + 1
+  }
+  return sustains
 }
 
 /** Сетка ритма на отрезке песни. Темп может меняться, поэтому отрезков много. */

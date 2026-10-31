@@ -4,6 +4,7 @@ import {
   findBeatGrid,
   findMoments,
   findSections,
+  findSustains,
   hasRhythm,
   snapToGrid,
   songIntensity,
@@ -59,13 +60,21 @@ export interface Difficulty {
   arrowPeriodSec: number
   /** В сильных частях песни каждая какая нота становится парной. 0 — парных нет. */
   pairEvery: number
+  /** Самое короткое расстояние между нотами, которое вообще можно сыграть. */
+  floorGapSec: number
+  /** Сколько нот максимум за любую секунду. */
+  maxPerSecond: number
+  /** Сколько стрелок в серии перед сменой части. */
+  arrowRun: number
+  /** На протяжных звуках два луча сразу. */
+  doubleHolds: boolean
   canFail: boolean
 }
 
 export const DIFFICULTIES: Difficulty[] = [
-  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, arrowPeriodSec: 14, pairEvery: 0, canFail: false },
-  { id: 'normal', label: 'Средняя', minGapSec: 0.3, arrowPeriodSec: 10, pairEvery: 16, canFail: true },
-  { id: 'hard', label: 'Сложная', minGapSec: 0.18, arrowPeriodSec: 7, pairEvery: 11, canFail: true },
+  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, arrowPeriodSec: 28, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 2, doubleHolds: false, canFail: false },
+  { id: 'normal', label: 'Средняя', minGapSec: 0.3, arrowPeriodSec: 20, pairEvery: 16, floorGapSec: 0.28, maxPerSecond: 3, arrowRun: 3, doubleHolds: false, canFail: true },
+  { id: 'hard', label: 'Сложная', minGapSec: 0.18, arrowPeriodSec: 14, pairEvery: 11, floorGapSec: 0.2, maxPerSecond: 4, arrowRun: 4, doubleHolds: true, canFail: true },
 ]
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
@@ -111,6 +120,14 @@ const MIN_ACCENT_GAP_SEC = 12
 /** Смену части ищем рядом с найденным событием, чтобы попасть в реальный удар. */
 const SECTION_SNAP_SEC = 1.5
 const LONG_PAUSE_SEC = 0.55
+/** Шаг внутри серии стрелок и на сколько серия заканчивается до смены части. */
+const ARROW_RUN_GAP_SEC = 0.32
+const ARROW_RUN_SPAN_SEC = 2.4
+const ARROW_RUN_END_SEC = 0.25
+const ARROW_RUN_AVOID_SEC = 5
+/** Длина лучей на протяжном звуке и воздух между ними. */
+const SUSTAIN_HOLD_MAX_SEC = 3
+const SUSTAIN_HOLD_GAP_SEC = 0.35
 /** Пробел событие редкое: два рядом обесценивают друг друга. */
 const MIN_SPACE_GAP_SEC = 8
 
@@ -146,29 +163,140 @@ export function generateLaneLevel(
 
   markLastNotesBeforePauses(notes, moments)
   const sections = findSections(analysis, intensity)
-  const withArrows = placeArrows(notes, difficulty, sections)
+  const withRuns = placeArrowRuns(notes, difficulty, sections)
+  const withArrows = placeArrows(withRuns, difficulty, sections)
   const withPairs = addPairs(withArrows, difficulty, analysis, intensity)
   const withHolds = addHolds(withPairs, difficulty, moments, analysis, intensity)
-  return addAccents(withHolds, moments, sections)
+  const withSustains = addSustainHolds(withHolds, difficulty, findSustains(analysis))
+  return limitDensity(addAccents(withSustains, moments, sections), difficulty)
 }
 
 /**
- * Стрелка — событие, а не случайная нота: приходит регулярно в любой части песни,
- * а соседние ноты убираются, чтобы успеть перенести руку. На смене части она
- * идёт перед границей и как бы перелистывает песню дальше.
+ * Серия стрелок перед сменой части: короткая россыпь чётких ударов подводит к
+ * кульминации или затиханию. Рука уже на стрелках, поэтому шаг может быть короче,
+ * чем между одиночной стрелкой и обычными нотами.
+ */
+function placeArrowRuns(notes: LaneNote[], difficulty: Difficulty, sections: Section[]): LaneNote[] {
+  const removed = new Set<LaneNote>()
+  let direction = 1
+  for (let i = 1; i < sections.length; i++) {
+    const end = sections[i].start - ARROW_RUN_END_SEC
+    const start = end - ARROW_RUN_SPAN_SEC
+    const window = notes.filter((note) => note.time >= start && note.time <= end && !removed.has(note))
+
+    // Идём от конца: последние удары перед сменой самые важные
+    const run: LaneNote[] = []
+    for (let j = window.length - 1; j >= 0 && run.length < difficulty.arrowRun; j--) {
+      const note = window[j]
+      const fitsGap = run.length === 0 || run[run.length - 1].time - note.time >= ARROW_RUN_GAP_SEC
+      if (note.kind === 'tap' && fitsGap) run.push(note)
+    }
+    if (run.length < 2) continue
+
+    run.reverse()
+    for (const note of run) {
+      note.kind = 'swipe'
+      note.direction = direction
+      direction = -direction
+    }
+    const first = run[0].time - ARROW_CLEAR_SEC
+    const last = run[run.length - 1].time + ARROW_CLEAR_SEC
+    for (const note of notes) {
+      if (note.time >= first && note.time <= last && !run.includes(note)) removed.add(note)
+    }
+  }
+  return notes.filter((note) => !removed.has(note))
+}
+
+/** Протяжный звук играется лучами: отдельные ноты внутри него убираем. */
+function addSustainHolds(notes: LaneNote[], difficulty: Difficulty, sustains: Moment[]): LaneNote[] {
+  let result = notes
+  const holds: LaneNote[] = []
+  let lane = 0
+  for (const sustain of sustains) {
+    result = result.filter((note) => note.time < sustain.start || note.time > sustain.end + ACCENT_CLEAR_SEC)
+    let time = sustain.start
+    while (sustain.end - time >= HOLD_MIN_SEC) {
+      const duration = Math.min(SUSTAIN_HOLD_MAX_SEC, sustain.end - time)
+      holds.push({ id: 0, time, lane, kind: 'hold', direction: 0, duration })
+      if (difficulty.doubleHolds) {
+        holds.push({ id: 0, time, lane: (lane + 2) % 3, kind: 'hold', direction: 0, duration })
+      }
+      lane = (lane + 1) % 3
+      time += duration + SUSTAIN_HOLD_GAP_SEC
+    }
+  }
+  const merged = [...result, ...holds]
+  merged.sort((a, b) => a.time - b.time)
+  return merged
+}
+
+/**
+ * Предел плотности: уровень не должен требовать невозможного. Работает последним,
+ * когда расставлены все ноты. Пробел, стрелки и лучи главнее обычных нот: если
+ * такая нота стоит вплотную к обычной, уходит обычная. Парная нота считается как
+ * одно нажатие.
+ */
+function limitDensity(notes: LaneNote[], difficulty: Difficulty): LaneNote[] {
+  const isProtected = (note: LaneNote) => note.kind === 'space' || note.kind === 'swipe' || note.kind === 'hold'
+  const kept: LaneNote[] = []
+
+  for (const note of notes) {
+    const previous = kept[kept.length - 1]
+    const isSameMoment = previous !== undefined && previous.time === note.time
+    if (isSameMoment) {
+      kept.push(note)
+      continue
+    }
+
+    if (isProtected(note)) {
+      // Луч вплотную к другой главной ноте не сыграть: он уступает
+      const isCrowded = previous !== undefined && note.time - previous.time < difficulty.floorGapSec
+      if (note.kind === 'hold' && isCrowded && isProtected(previous)) continue
+
+      // Убираем слишком близкие обычные ноты перед главной, вместе с парой
+      while (kept.length > 0) {
+        const last = kept[kept.length - 1]
+        if (isProtected(last) || note.time - last.time >= difficulty.floorGapSec) break
+        kept.pop()
+      }
+      kept.push(note)
+      continue
+    }
+
+    const tooClose = previous !== undefined && note.time - previous.time < difficulty.floorGapSec
+    if (tooClose || pressesInLastSecond(kept, note.time) >= difficulty.maxPerSecond) continue
+    kept.push(note)
+  }
+
+  for (let i = 0; i < kept.length; i++) kept[i] = { ...kept[i], id: i }
+  return kept
+}
+
+/** Сколько отдельных нажатий было за секунду до этого момента. */
+function pressesInLastSecond(kept: LaneNote[], time: number): number {
+  let presses = 0
+  for (let i = kept.length - 1; i >= 0 && time - kept[i].time < 1; i--) {
+    if (i === 0 || kept[i].time !== kept[i - 1].time) presses += 1
+  }
+  return presses
+}
+
+/**
+ * Одиночная стрелка — редкое событие внутри части: соседние ноты убираются,
+ * чтобы успеть перенести руку.
  */
 function placeArrows(notes: LaneNote[], difficulty: Difficulty, sections: Section[]): LaneNote[] {
   const targets: number[] = []
-  for (let i = 1; i < sections.length; i++) targets.push(sections[i].start - 1)
   const lastTime = notes.length > 0 ? notes[notes.length - 1].time : 0
   for (let time = difficulty.arrowPeriodSec; time < lastTime; time += difficulty.arrowPeriodSec) {
+    // Рядом с серией перед сменой части одиночная стрелка не нужна
     let isFree = true
-    for (const target of targets) {
-      if (Math.abs(target - time) < difficulty.arrowPeriodSec / 2) isFree = false
+    for (let i = 1; i < sections.length; i++) {
+      if (Math.abs(sections[i].start - time) < ARROW_RUN_AVOID_SEC) isFree = false
     }
     if (isFree) targets.push(time)
   }
-  targets.sort((a, b) => a - b)
 
   const removed = new Set<LaneNote>()
   let direction = 1

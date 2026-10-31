@@ -416,6 +416,29 @@ function extrudeFlat(shape: THREE.Shape, thickness: number): THREE.BufferGeometr
  * Круг с лункой: профиль от центра к краю вращается вокруг оси. Центр ниже
  * края, поэтому нота выглядит вогнутой, как тарелка, а свет ложится по кромке.
  */
+/**
+ * Шестигранная платформа: низкое основание, скошенный борт и утопленная площадка.
+ * Шесть граней вместо круга дают чёткие блики, а отдельные нормали на гранях
+ * делают рёбра резкими, как у металлической детали.
+ */
+function createPlatformGeometry(): THREE.BufferGeometry {
+  const profile = [
+    new THREE.Vector2(0, 0.05),
+    new THREE.Vector2(0.14, 0.05),
+    new THREE.Vector2(0.155, 0.085),
+    new THREE.Vector2(0.19, 0.085),
+    new THREE.Vector2(0.235, 0.035),
+    new THREE.Vector2(0.235, -0.04),
+    new THREE.Vector2(0, -0.04),
+  ]
+  const geometry = new THREE.LatheGeometry(profile.reverse(), 6).toNonIndexed()
+  geometry.computeVertexNormals()
+  // Поворот на 30 градусов ставит шестигранник острым углом вбок, а не вверх
+  geometry.rotateY(Math.PI / 6)
+  geometry.rotateX(Math.PI / 2)
+  return geometry
+}
+
 function createDishedCoinGeometry(): THREE.LatheGeometry {
   const profile = [
     new THREE.Vector2(0, 0.015),
@@ -814,7 +837,7 @@ export class LaneScene {
   }
 
   /**
-   * Кнопка внизу дорожки: массивное кольцо, тёмное дно, светящаяся середина и
+   * Кнопка внизу дорожки: объёмная шестигранная платформа, светящаяся середина и
    * буква клавиши. Вся группа наклонена так же, как ноты, поэтому лежит в той
    * же плоскости.
    */
@@ -823,10 +846,6 @@ export class LaneScene {
     group.position.y = HIT_Y
     group.rotation.x = NOTE_TILT - Math.PI / 2
 
-    const base = new THREE.Mesh(
-      new THREE.CircleGeometry(0.19, 48),
-      new THREE.MeshBasicMaterial({ color: '#031311', transparent: true, opacity: 0.9, depthTest: false }),
-    )
     const light = new THREE.MeshBasicMaterial({
       color: LANE_COLORS[lane],
       transparent: true,
@@ -834,16 +853,18 @@ export class LaneScene {
       depthTest: false,
       depthWrite: false,
     })
-    const glow = new THREE.Mesh(new THREE.CircleGeometry(0.15, 48), light)
-    const ringMaterial = createNoteMaterial(LANE_COLORS[lane], false)
+    const glow = new THREE.Mesh(new THREE.CircleGeometry(0.15, 6, Math.PI / 6), light)
+    glow.position.z = 0.06
+    const ringMaterial = createNoteMaterial(LANE_COLORS[lane])
     this.ringColors.push(ringMaterial.uniforms.uColor.value)
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.175, 0.04, 16, 64), ringMaterial)
+    const ring = new THREE.Mesh(createPlatformGeometry(), ringMaterial)
     const label = new THREE.Mesh(
       new THREE.PlaneGeometry(0.15, 0.15),
       new THREE.MeshBasicMaterial({ map: createKeyTexture(LANE_KEYS[lane]), transparent: true, depthTest: false }),
     )
+    label.position.z = 0.07
     let order = 2
-    for (const mesh of [base, glow, ring, label]) {
+    for (const mesh of [ring, glow, label]) {
       mesh.renderOrder = order
       order += 0.1
       group.add(mesh)
