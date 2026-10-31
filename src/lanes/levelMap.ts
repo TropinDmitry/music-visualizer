@@ -43,6 +43,8 @@ interface MapState {
   analysis: AudioAnalysis
   notes: LaneNote[]
   onsets: OnsetInfo[]
+  /** Смены звука, найденные по спектру. */
+  changes: number[]
 }
 
 const fileInput = document.querySelector<HTMLInputElement>('#file')!
@@ -63,7 +65,9 @@ for (const difficulty of DIFFICULTIES) {
   difficultySelect.add(new Option(difficulty.label, difficulty.id))
 }
 difficultySelect.value = 'hard'
-legend.innerHTML = FATES.map((fate) => `<span><i style="background:${fate.color}"></i>${fate.label}</span>`).join('')
+legend.innerHTML =
+  FATES.map((fate) => `<span><i style="background:${fate.color}"></i>${fate.label}</span>`).join('') +
+  '<span><i style="background:#5ee6b8"></i>смена звука по спектру (метка над рядом судьбы)</span>'
 
 fileInput.addEventListener('change', () => {
   const file = fileInput.files?.[0]
@@ -109,7 +113,7 @@ async function loadTrack(file: File): Promise<void> {
 
 function buildLevel(analysis: AudioAnalysis): void {
   const difficulty = DIFFICULTIES.find((item) => item.id === difficultySelect.value) ?? DIFFICULTIES[2]
-  const trace: LevelTrace = { audible: [], spaced: [], even: [], beforeLimit: [] }
+  const trace: LevelTrace = { audible: [], changes: [], spaced: [], even: [], beforeLimit: [] }
   const notes = generateLaneLevel(analysis, difficulty, 'auto', trace)
 
   const audible = new Set(trace.audible)
@@ -131,7 +135,7 @@ function buildLevel(analysis: AudioAnalysis): void {
     onsets.push({ time, strength: analysis.onsetStrength[frame], fate })
   }
 
-  state = { analysis, notes, onsets }
+  state = { analysis, notes, onsets, changes: trace.changes.map((frame) => frame / analysis.fps) }
   showFunnel(state, trace)
   drawAll()
 }
@@ -148,6 +152,7 @@ function showFunnel(current: MapState, trace: LevelTrace): void {
   const countFate = (fate: Fate) => onsets.filter((onset) => onset.fate === fate).length
   const steps = [
     ['Детектор нашёл ударов', analysis.onsetTimes.length],
+    ['Смен звука по спектру', trace.changes.length],
     ['Прошли порог (с голосом)', trace.audible.length],
     ['Прошли расстояние', trace.spaced.length],
     ['Прошли ровность', trace.even.length],
@@ -217,7 +222,7 @@ function drawOverview({ analysis, notes, onsets }: MapState): void {
   ctx.strokeRect(toX(viewStart), 0.5, toX(span), height - 1)
 }
 
-function drawDetail({ analysis, notes, onsets }: MapState): void {
+function drawDetail({ analysis, notes, onsets, changes }: MapState): void {
   const ctx = prepare(detail)
   if (!ctx) return
   const width = detail.clientWidth
@@ -251,6 +256,17 @@ function drawDetail({ analysis, notes, onsets }: MapState): void {
     ctx.lineTo(x, strengthBottom)
     ctx.stroke()
     ctx.globalAlpha = 1
+  }
+
+  // Смены звука: короткие метки сверху ряда судьбы
+  ctx.strokeStyle = '#5ee6b8'
+  ctx.lineWidth = 2
+  for (const time of changes) {
+    if (!inView(time)) continue
+    ctx.beginPath()
+    ctx.moveTo(toX(time), strengthBottom - 16)
+    ctx.lineTo(toX(time), strengthBottom - 2)
+    ctx.stroke()
   }
 
   drawLanes(ctx, notes, fatesBottom, height, toX, inView)

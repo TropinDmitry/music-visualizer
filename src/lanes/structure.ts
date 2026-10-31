@@ -59,6 +59,10 @@ const PULSE_MIN_CHANGE = 0.004
 const PULSE_MIN_PROMINENCE = 1.3
 /** Пульс возвращается к тому же звуку. Взлёт тона уходит всё дальше, и это не пульс. */
 const PULSE_SAME_SOUND = 0.7
+/** Такая смена спектра значит, что музыка стала другой: протяжный звук здесь кончился. */
+const BIG_CHANGE = 0.03
+/** И она должна быть внезапной: плавный взлёт тона меняет спектр постоянно. */
+const BIG_CHANGE_SHARPNESS = 3
 /** Какой шаг считается пульсом и сколько ударов подряд нужно, чтобы поверить в него. */
 const PULSE_MIN_PERIOD_SEC = 0.4
 const PULSE_MAX_PERIOD_SEC = 1.2
@@ -181,6 +185,14 @@ export function findSections(analysis: AudioAnalysis, intensity: Float32Array): 
  * вверх, как взлёт перед дропом. Отдельными нотами такое не сыграть, это работа
  * для длинных лучей.
  */
+/** Момент, когда спектр заметно поменялся, и размер этой перемены. */
+export interface SoundChange {
+  time: number
+  size: number
+  /** Во сколько раз перемена больше, чем было рядом. */
+  sharpness: number
+}
+
 export function findSustains(analysis: AudioAnalysis): Moment[] {
   const fps = analysis.fps
   const stepFrames = Math.round(SUSTAIN_STEP_SEC * fps)
@@ -252,12 +264,33 @@ export function findSoftPulses(analysis: AudioAnalysis, sustains: Moment[]): num
   while (first < sustains.length) {
     let last = first
     while (last + 1 < sustains.length && sustains[last + 1].start - sustains[last].end <= PULSE_JOIN_GAP_SEC) last += 1
-    const peaks = spectrumChanges(analysis, sustains[first].start, sustains[last].end)
+    const peaks = spectrumChanges(analysis, sustains[first].start, sustains[last].end).map((peak) => peak.time)
     const chain = longestChain(peaks)
-    if (chain.length > 0 && staysTheSameSound(analysis, chain)) pulses.push(...withMelody(chain, peaks))
+    if (chain.length > 0 && staysTheSameSound(analysis, chain)) pulses.push(...extendBack(chain, sustains))
     first = last + 1
   }
   return pulses
+}
+
+/** Смены звука по всему треку: удары детектор видит, а смену ноты в риффе почти нет. */
+export function findNoteChanges(analysis: AudioAnalysis): SoundChange[] {
+  return spectrumChanges(analysis, 0, analysis.duration)
+}
+
+/** Режет протяжные участки там, где звук резко сменился. */
+export function splitAtBigChanges(analysis: AudioAnalysis, sustains: Moment[]): Moment[] {
+  const result: Moment[] = []
+  for (const sustain of sustains) {
+    let start = sustain.start
+    for (const change of spectrumChanges(analysis, sustain.start, sustain.end)) {
+      const isBig = change.size >= BIG_CHANGE && change.sharpness >= BIG_CHANGE_SHARPNESS
+      if (!isBig || change.time - start < SUSTAIN_MIN_SEC) continue
+      result.push({ ...sustain, start, end: change.time })
+      start = change.time
+    }
+    if (sustain.end - start >= SUSTAIN_MIN_SEC) result.push({ ...sustain, start })
+  }
+  return result
 }
 
 /** Убирает из протяжных участков отрезки с пульсом: там не луч, а ноты. */
@@ -285,7 +318,7 @@ function staysTheSameSound(analysis: AudioAnalysis, chain: number[]): boolean {
 }
 
 /** Моменты на отрезке, где спектр заметно меняется. */
-function spectrumChanges(analysis: AudioAnalysis, fromSec: number, toSec: number): number[] {
+function spectrumChanges(analysis: AudioAnalysis, fromSec: number, toSec: number): SoundChange[] {
   const from = Math.max(PULSE_BEFORE_FRAMES, Math.round(fromSec * analysis.fps))
   const to = Math.min(analysis.frameCount - PULSE_SIDE_FRAMES - PULSE_AFTER_FRAMES, Math.round(toSec * analysis.fps))
   const frames: number[] = []
@@ -297,12 +330,14 @@ function spectrumChanges(analysis: AudioAnalysis, fromSec: number, toSec: number
     changes.push(1 - similarity(before, after))
   }
 
-  const peaks: number[] = []
+  const peaks: SoundChange[] = []
   for (let i = 2; i + 2 < changes.length; i++) {
     const isPeak = changes[i] > changes[i - 1] && changes[i] >= changes[i + 1] && changes[i] > changes[i - 2]
     const valley = Math.min(changes[i - 2], changes[i + 2])
     const isProminent = changes[i] >= valley * PULSE_MIN_PROMINENCE
-    if (isPeak && isProminent && changes[i] > PULSE_MIN_CHANGE) peaks.push(frames[i] / analysis.fps)
+    if (isPeak && isProminent && changes[i] > PULSE_MIN_CHANGE) {
+      peaks.push({ time: frames[i] / analysis.fps, size: changes[i], sharpness: changes[i] / Math.max(valley, 1e-6) })
+    }
   }
   return peaks
 }
@@ -329,19 +364,15 @@ function similarity(a: Float32Array, b: Float32Array): number {
   return squareA > 0 && squareB > 0 ? product / Math.sqrt(squareA * squareB) : 1
 }
 
-/** Цепочка задаёт только границы пульса, а ноты ставим на все настоящие изменения внутри. */
-function withMelody(chain: number[], peaks: number[]): number[] {
-  const result = [...chain]
-  for (const peak of peaks) {
-    const isInside = peak > chain[0] && peak < chain[chain.length - 1]
-    if (!isInside) continue
-    let isNew = true
-    for (const time of chain) {
-      if (Math.abs(time - peak) < PULSE_TOLERANCE_SEC) isNew = false
-    }
-    if (isNew) result.push(peak)
+/** Первый найденный удар бывает не первым: тянем пульс назад до начала своего участка. */
+function extendBack(chain: number[], sustains: Moment[]): number[] {
+  const period = (chain[chain.length - 1] - chain[0]) / (chain.length - 1)
+  let earliest = 0
+  for (const sustain of sustains) {
+    if (sustain.start <= chain[0]) earliest = sustain.start
   }
-  result.sort((a, b) => a - b)
+  const result = [...chain]
+  while (result[0] - period >= earliest + PULSE_TOLERANCE_SEC) result.unshift(result[0] - period)
   return result
 }
 

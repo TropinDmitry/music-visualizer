@@ -2,10 +2,12 @@ import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { beatWeight, pickNoteFrames } from '../game/level.ts'
 import {
   findMoments,
+  findNoteChanges,
   findSections,
   findSoftPulses,
   findSustains,
   songIntensity,
+  splitAtBigChanges,
   withoutPulses,
   type Moment,
   type Section,
@@ -64,6 +66,8 @@ export interface Difficulty {
   floorGapSec: number
   /** Сколько нот максимум за любую секунду. */
   maxPerSecond: number
+  /** Рисунок внутри шага мягкого пульса: доли шага, на которых стоят ноты. */
+  pulsePattern: number[]
   /** Сколько стрелок максимум в серии. */
   arrowRun: number
   /** На протяжных звуках два луча сразу. */
@@ -72,9 +76,9 @@ export interface Difficulty {
 }
 
 export const DIFFICULTIES: Difficulty[] = [
-  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, arrowPeriodSec: 20, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
-  { id: 'normal', label: 'Средняя', minGapSec: 0.28, strengthShare: 0.8, arrowPeriodSec: 12, pairEvery: 16, floorGapSec: 0.26, maxPerSecond: 4, arrowRun: 3, doubleHolds: false, canFail: true },
-  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.72, arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.14, maxPerSecond: 7, arrowRun: 4, doubleHolds: true, canFail: true },
+  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, pulsePattern: [0], arrowPeriodSec: 20, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
+  { id: 'normal', label: 'Средняя', minGapSec: 0.28, strengthShare: 0.8, pulsePattern: [0, 0.5], arrowPeriodSec: 12, pairEvery: 16, floorGapSec: 0.26, maxPerSecond: 4, arrowRun: 3, doubleHolds: false, canFail: true },
+  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.72, pulsePattern: [0, 0.5, 0.75], arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.14, maxPerSecond: 7, arrowRun: 4, doubleHolds: true, canFail: true },
 ]
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
@@ -98,6 +102,13 @@ const VOICE_FOCUS_BEAT_EXTRA = 0.25
 const SYLLABLE_EXTRA = 0.25
 /** Удары ближе этого играются только ровной дробью, а случайную россыпь не сыграть. */
 const FAST_GAP_SEC = 0.17
+const CHANGE_NEAR_ONSET_SEC = 0.1
+/** Дальше этого соседние удары пульса принадлежат разным отрезкам. */
+const PULSE_MAX_STEP_SEC = 1.3
+/** Сильный удар сразу перед пульсом остаётся нотой. */
+const PULSE_EDGE_SEC = 0.05
+const CHANGE_LEVEL_REACH_FRAMES = 6
+const CHANGE_MIN_LEVEL_SHARE = 0.85
 const EVEN_GAP_TOLERANCE_SEC = 0.04
 /** В активной части порог ниже: нотами становятся и звуки потише, игра идёт бодрее. */
 const ACTIVE_SHARE_DROP = 0.2
@@ -122,6 +133,7 @@ const LONG_PAUSE_SEC = 0.55
 /** Длинный звук играется одним лучом, но не бесконечным: рука должна отдыхать. */
 const SUSTAIN_HOLD_MAX_SEC = 6
 const SUSTAIN_HOLD_GAP_SEC = 0.35
+const SUSTAIN_END_KEEP_SEC = 0.1
 /** Пробел рядом с началом протяжного звука мешает: на этом месте главный луч. */
 const SPACE_SUSTAIN_CLEAR_SEC = 1.5
 /** Пара дорожек для протяжного звука: всегда одна и та же, крайние. */
@@ -133,6 +145,8 @@ const MIN_SPACE_GAP_SEC = 8
 export interface LevelTrace {
   /** Кадры ударов, прошедших порог силы. */
   audible: number[]
+  /** Кадры смен звука, найденных по спектру. */
+  changes: number[]
   /** Кадры, оставшиеся после минимального расстояния. */
   spaced: number[]
   /** Кадры, оставшиеся после проверки быстрых нот на ровность. */
@@ -156,7 +170,7 @@ export function generateLaneLevel(
 ): LaneNote[] {
   const moments = findMoments(analysis)
   const intensity = songIntensity(analysis)
-  const rawSustains = findSustains(analysis)
+  const rawSustains = splitAtBigChanges(analysis, findSustains(analysis))
   const pulses = findSoftPulses(analysis, rawSustains)
   const sustains = withoutPulses(rawSustains, pulses)
   const frames = pickFramesWithMoments(analysis, difficulty, moments, focus, pulses, intensity, trace)
@@ -167,7 +181,7 @@ export function generateLaneLevel(
   for (let i = 0; i < frames.length; i++) {
     const time = frames[i] / analysis.fps
     let lane = lanes[i]
-    if (isInRush(time, moments)) {
+    if (isInRush(time, moments) || isInPulse(time, pulses)) {
       lane = STAIRS[stairStep % STAIRS.length]
       stairStep += 1
     }
@@ -305,7 +319,8 @@ function addSustainHolds(notes: LaneNote[], difficulty: Difficulty, sustains: Mo
   const holds: LaneNote[] = []
   for (const sustain of sustains) {
     const start = sustain.start - ACCENT_CLEAR_SEC
-    result = result.filter((note) => note.time < start || note.time > sustain.end + ACCENT_CLEAR_SEC)
+    // Конец не трогаем: звук кончается ударом, и этот удар и есть нота
+    result = result.filter((note) => note.time < start || note.time >= sustain.end - SUSTAIN_END_KEEP_SEC)
 
     let time = sustain.start
     while (sustain.end - time >= HOLD_MIN_SEC) {
@@ -402,6 +417,22 @@ function pickRhythmFrames(
     addAudible(importance, syllables, weights, syllableShare, analysis.fps, intensity)
   }
 
+  // Смена ноты в риффе не даёт прироста громкости, поэтому ищется по спектру отдельно
+  const changes: number[] = []
+  const changeSizes: number[] = []
+  if (focus !== 'voice') {
+    const lastTime = analysis.duration - TAIL_FRAMES / analysis.fps
+    for (const change of findNoteChanges(analysis)) {
+      if (change.time < LEAD_IN_SEC || change.time > lastTime) continue
+      const frame = Math.round(change.time * analysis.fps)
+      // Рядом уже есть удар: он точнее по времени, смена нужна только там, где удара нет
+      if (hasOnsetNear(analysis, frame) || isFading(analysis, frame)) continue
+      changes.push(frame)
+      changeSizes.push(change.size)
+    }
+  }
+  addAudible(importance, changes, changeSizes, difficulty.strengthShare, analysis.fps, intensity)
+
   const candidates = [...importance.keys()]
   candidates.sort((a, b) => (importance.get(b) ?? 0) - (importance.get(a) ?? 0))
   const gapFrames = difficulty.minGapSec * analysis.fps
@@ -417,23 +448,54 @@ function pickRhythmFrames(
   const even = dropUnevenFast(picked, analysis.fps)
   if (trace) {
     trace.audible = candidates
+    trace.changes = changes
     trace.spaced = picked
     trace.even = even
   }
   return even
 }
 
-/** Мягкий пульс тоже становится нотами: детектор ударов его не слышит. */
-function addPulses(frames: number[], pulses: number[], fps: number, minGapSec: number): void {
-  for (const time of pulses) {
-    const frame = Math.round(time * fps)
-    let isFree = true
-    for (const other of frames) {
-      if (Math.abs(other - frame) < minGapSec * fps) isFree = false
-    }
-    if (isFree) frames.push(frame)
+/** Затухание тоже меняет спектр, но это не новая нота. */
+function isFading(analysis: AudioAnalysis, frame: number): boolean {
+  const level = (at: number) => analysis.mid[at] + analysis.treble[at]
+  const after = Math.min(frame + CHANGE_LEVEL_REACH_FRAMES, analysis.frameCount - 1)
+  const before = Math.max(frame - CHANGE_LEVEL_REACH_FRAMES, 0)
+  return level(after) < level(before) * CHANGE_MIN_LEVEL_SHARE
+}
+
+function hasOnsetNear(analysis: AudioAnalysis, frame: number): boolean {
+  const reach = Math.round(CHANGE_NEAR_ONSET_SEC * analysis.fps)
+  const to = Math.min(analysis.frameCount - 1, frame + reach)
+  for (let i = Math.max(0, frame - reach); i <= to; i++) {
+    if (analysis.onsets[i] === 1) return true
+  }
+  return false
+}
+
+/**
+ * На мягком пульсе случайные ноты выглядят хаосом, поэтому весь отрезок заменяется
+ * ровным рисунком на шаге пульса: рука чувствует ритм, даже если ударов почти не слышно.
+ */
+function addPulsePattern(frames: number[], pulses: number[], fps: number, pattern: number[]): void {
+  if (pulses.length === 0) return
+  const kept = frames.filter((frame) => !isInPulse(frame / fps, pulses))
+  frames.length = 0
+  frames.push(...kept)
+  for (let i = 0; i + 1 < pulses.length; i++) {
+    const step = pulses[i + 1] - pulses[i]
+    if (step > PULSE_MAX_STEP_SEC) continue
+    for (const share of pattern) frames.push(Math.round((pulses[i] + step * share) * fps))
   }
   frames.sort((a, b) => a - b)
+}
+
+/** Время внутри одного из отрезков с пульсом. Между отрезками шаг заведомо длиннее. */
+function isInPulse(time: number, pulses: number[]): boolean {
+  for (let i = 0; i + 1 < pulses.length; i++) {
+    const step = pulses[i + 1] - pulses[i]
+    if (step <= PULSE_MAX_STEP_SEC && time >= pulses[i] - PULSE_EDGE_SEC && time <= pulses[i + 1]) return true
+  }
+  return false
 }
 
 /** Оставляет удары, близкие по силе к самому сильному в окрестности. */
@@ -511,7 +573,7 @@ function pickFramesWithMoments(
   trace?: LevelTrace,
 ): number[] {
   const picked = pickRhythmFrames(analysis, difficulty, focus, intensity, trace)
-  addPulses(picked, pulses, analysis.fps, difficulty.minGapSec)
+  addPulsePattern(picked, pulses, analysis.fps, difficulty.pulsePattern)
   const rushCandidates = pickNoteFrames(analysis, difficulty.minGapSec * BUILDUP_RUSH_GAP)
 
   const frames: number[] = []
