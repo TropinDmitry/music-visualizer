@@ -18,19 +18,6 @@ export interface LaneNote {
   direction: number
 }
 
-/** Отрезок припева без нот: игрок трясёт мышью или часто жмёт пробел. */
-export interface ShakeZone {
-  id: number
-  start: number
-  end: number
-  target: number
-}
-
-export interface LaneLevel {
-  notes: LaneNote[]
-  shakeZones: ShakeZone[]
-}
-
 export type DifficultyId = 'easy' | 'normal' | 'hard'
 
 export interface Difficulty {
@@ -48,13 +35,6 @@ export const DIFFICULTIES: Difficulty[] = [
   { id: 'hard', label: 'Сложная', minGapSec: 0.18, swipeEvery: 6, canFail: true },
 ]
 
-const SHAKE_LENGTH_SEC = 3
-const SHAKE_TARGET = 12
-/** Один отрезок встряски примерно на столько секунд трека. */
-const SECONDS_PER_SHAKE = 45
-const MIN_DURATION_FOR_SHAKE = 30
-const SHAKE_EDGE_SEC = 5
-
 export function findDifficulty(id: DifficultyId): Difficulty {
   for (const difficulty of DIFFICULTIES) {
     if (difficulty.id === id) return difficulty
@@ -62,9 +42,8 @@ export function findDifficulty(id: DifficultyId): Difficulty {
   return DIFFICULTIES[0]
 }
 
-export function generateLaneLevel(analysis: AudioAnalysis, difficulty: Difficulty): LaneLevel {
-  const shakeZones = findShakeZones(analysis)
-  const frames = pickFramesOutsideZones(analysis, difficulty, shakeZones)
+export function generateLaneLevel(analysis: AudioAnalysis, difficulty: Difficulty): LaneNote[] {
+  const frames = pickNoteFrames(analysis, difficulty.minGapSec)
   const lanes = chooseLanes(analysis, frames)
 
   const notes: LaneNote[] = []
@@ -80,21 +59,7 @@ export function generateLaneLevel(analysis: AudioAnalysis, difficulty: Difficult
       direction: isSwipe ? swipeDirection : 0,
     })
   }
-
-  return { notes, shakeZones }
-}
-
-function pickFramesOutsideZones(analysis: AudioAnalysis, difficulty: Difficulty, zones: ShakeZone[]): number[] {
-  const frames: number[] = []
-  for (const frame of pickNoteFrames(analysis, difficulty.minGapSec)) {
-    const time = frame / analysis.fps
-    let insideZone = false
-    for (const zone of zones) {
-      if (time >= zone.start - 0.2 && time <= zone.end + 0.2) insideZone = true
-    }
-    if (!insideZone) frames.push(frame)
-  }
-  return frames
+  return notes
 }
 
 /** Для каждого удара считает «центр тяжести» спектра и делит удары на три равные группы. */
@@ -129,34 +94,4 @@ function spectrumCenter(analysis: AudioAnalysis, frame: number): number {
     sum += value
   }
   return sum === 0 ? 0 : weightedSum / sum
-}
-
-/** В каждом большом куске трека ищет самые громкие три секунды: обычно это припев. */
-function findShakeZones(analysis: AudioAnalysis): ShakeZone[] {
-  if (analysis.duration < MIN_DURATION_FOR_SHAKE) return []
-
-  const zones: ShakeZone[] = []
-  const windowFrames = Math.round(SHAKE_LENGTH_SEC * analysis.fps)
-  const prefix = new Float64Array(analysis.frameCount + 1)
-  for (let i = 0; i < analysis.frameCount; i++) prefix[i + 1] = prefix[i] + analysis.rms[i]
-
-  const usable = analysis.duration - SHAKE_EDGE_SEC * 2
-  const count = Math.max(1, Math.floor(usable / SECONDS_PER_SHAKE))
-  for (let part = 0; part < count; part++) {
-    const from = Math.round((SHAKE_EDGE_SEC + (usable * part) / count) * analysis.fps)
-    const to = Math.round((SHAKE_EDGE_SEC + (usable * (part + 1)) / count) * analysis.fps) - windowFrames
-
-    let bestStart = from
-    let bestLoudness = -1
-    for (let start = from; start <= to; start++) {
-      const loudness = prefix[start + windowFrames] - prefix[start]
-      if (loudness > bestLoudness) {
-        bestLoudness = loudness
-        bestStart = start
-      }
-    }
-    const start = bestStart / analysis.fps
-    zones.push({ id: part, start, end: start + SHAKE_LENGTH_SEC, target: SHAKE_TARGET })
-  }
-  return zones
 }

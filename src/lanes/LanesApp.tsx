@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type PointerEvent } from 'react'
 import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { AudioPlayer } from '../audio/AudioPlayer.ts'
 import { createEmptyFeatures, sampleFeatures } from '../audio/frameFeatures.ts'
@@ -9,14 +9,14 @@ import { CLIP_LOOKS, LaneScene, type ClipLook } from './LaneScene.ts'
 import { DIFFICULTIES, findDifficulty, generateLaneLevel, type DifficultyId } from './level.ts'
 import {
   accuracy,
-  activeShakeZone,
   createLaneGame,
+  MISS_WARNING_STREAK,
   multiplier,
+  multiplierProgress,
   playAutopilot,
   pressLane,
   pressSwipe,
   rank,
-  registerShake,
   stepLanes,
   type LaneEvent,
   type LaneGame,
@@ -31,6 +31,7 @@ interface Settings {
   offsetMs: number
   look: ClipLook
   clipBrightness: number
+  laneContrast: number
   autopilot: boolean
 }
 
@@ -38,34 +39,94 @@ interface Hud {
   score: number
   combo: number
   multiplier: number
+  multiplierFill: number
   energy: number
   time: number
-  judgement: string
-  /** Заполнение встряски 0..1, или null, если сейчас её нет. */
-  shake: number | null
+  accuracyPercent: number
+  isInDanger: boolean
+}
+
+/** Большая надпись по центру: похвала или предупреждение. */
+interface Banner {
+  id: number
+  text: string
+  detail: string
+  isWarning: boolean
+}
+
+/** Всплывающее число очков над дорожкой. */
+interface Popup {
+  id: number
+  lane: number
+  text: string
+  type: LaneEvent['type']
 }
 
 interface GameResult {
   failed: boolean
   rank: string
   score: number
+  bestScore: number
+  isNewBest: boolean
   accuracyPercent: number
   maxCombo: number
+  perfects: number
+  goods: number
+  misses: number
 }
 
-const EMPTY_HUD: Hud = { score: 0, combo: 0, multiplier: 1, energy: 1, time: 0, judgement: '', shake: null }
+const EMPTY_HUD: Hud = {
+  score: 0,
+  combo: 0,
+  multiplier: 1,
+  multiplierFill: 0,
+  energy: 1,
+  time: 0,
+  accuracyPercent: 100,
+  isInDanger: false,
+}
 const LANE_KEYS: Record<string, number> = { KeyA: 0, KeyS: 1, KeyD: 2, Digit1: 0, Digit2: 1, Digit3: 2 }
 const NO_JUDGED = new Set<number>()
 /** Если картинка разошлась со звуком на столько секунд, подтягиваем её. */
 const VIDEO_MAX_DRIFT_SEC = 0.15
-/** Рывок мыши короче этого не считается встряской: так не срабатывает случайное дрожание руки. */
-const SHAKE_MIN_MOVE_PX = 12
+const LOW_ENERGY = 0.3
+const MAX_POPUPS = 6
+/** Расстояние между дорожками на линии нажатия, в долях высоты экрана. */
+const POPUP_LANE_STEP_VH = 31
 
-const JUDGEMENT_TEXT: Record<LaneEvent['type'], string> = {
-  perfect: 'ТОЧНО',
-  good: 'ХОРОШО',
-  miss: 'МИМО',
-  shakeDone: 'ВСТРЯСКА!',
+const PRAISE: Record<number, string> = {
+  10: 'РАЗОГРЕВ',
+  25: 'ОТЛИЧНО!',
+  50: 'НЕУДЕРЖИМО!',
+  75: 'В ПОТОКЕ!',
+  100: 'ЛЕГЕНДА!',
+  150: 'БЕЗ ЕДИНОЙ ОШИБКИ?',
+  200: 'ВЫ МАШИНА!',
+  300: 'ЗА ГРАНЬЮ!',
+  500: 'АБСОЛЮТ!',
+}
+
+function loadBestScore(key: string): number {
+  try {
+    return Number(localStorage.getItem(key)) || 0
+  } catch {
+    return 0 // в приватном режиме хранилище может быть недоступно
+  }
+}
+
+function saveBestScore(key: string, score: number): void {
+  try {
+    localStorage.setItem(key, String(score))
+  } catch {
+    // рекорд просто не сохранится, игре это не мешает
+  }
+}
+
+function resultTitle(result: GameResult): string {
+  if (result.failed) return 'Энергия закончилась'
+  if (result.misses === 0) return 'Без единого промаха!'
+  if (result.rank === 'S' || result.rank === 'A') return 'Отличная партия'
+  return 'Трек пройден'
 }
 
 export function LanesApp() {
@@ -75,7 +136,7 @@ export function LanesApp() {
   const playerRef = useRef<AudioPlayer | null>(null)
   const gameRef = useRef<LaneGame | null>(null)
   const pressedLanesRef = useRef([false, false, false])
-  const lastMouseDirectionRef = useRef(0)
+  const nextIdRef = useRef(1)
   const eventHandlerRef = useRef<(event: LaneEvent | null) => void>(() => {})
 
   const [screen, setScreen] = useState<Screen>('menu')
@@ -85,6 +146,8 @@ export function LanesApp() {
   const [clipUrl, setClipUrl] = useState('')
   const [status, setStatus] = useState('')
   const [hud, setHud] = useState<Hud>(EMPTY_HUD)
+  const [banner, setBanner] = useState<Banner | null>(null)
+  const [popups, setPopups] = useState<Popup[]>([])
   const [result, setResult] = useState<GameResult | null>(null)
   const [settings, setSettings] = useState<Settings>({
     difficulty: 'normal',
@@ -93,6 +156,7 @@ export function LanesApp() {
     offsetMs: 0,
     look: 'outline',
     clipBrightness: 0.8,
+    laneContrast: 0.75,
     autopilot: false,
   })
 
@@ -107,17 +171,27 @@ export function LanesApp() {
     return playerRef.current
   }
 
+  const bestScoreKey = `triada-best:${trackName}:${settings.difficulty}`
+
   const finishGame = () => {
     const game = gameRef.current
     if (!game) return
     playerRef.current?.pause()
     videoRef.current?.pause()
+    const previousBest = loadBestScore(bestScoreKey)
+    const isNewBest = game.score > previousBest
+    if (isNewBest) saveBestScore(bestScoreKey, game.score)
     setResult({
       failed: game.failed,
       rank: rank(game),
       score: game.score,
+      bestScore: Math.max(previousBest, game.score),
+      isNewBest,
       accuracyPercent: Math.round(accuracy(game) * 100),
       maxCombo: game.maxCombo,
+      perfects: game.perfects,
+      goods: game.goods,
+      misses: game.misses,
     })
     setScreen('results')
   }
@@ -135,8 +209,6 @@ export function LanesApp() {
     const features = createEmptyFeatures()
     let frameId = 0
     let lastHudAt = 0
-    let judgement = ''
-    let judgementUntil = 0
 
     const resize = () => {
       const scale = Math.min(window.devicePixelRatio || 1, 2)
@@ -148,12 +220,28 @@ export function LanesApp() {
     observer.observe(canvas)
     resize()
 
+    const showBanner = (text: string, detail: string, isWarning: boolean) => {
+      nextIdRef.current += 1
+      setBanner({ id: nextIdRef.current, text, detail, isWarning })
+    }
+
     const handleEvent = (event: LaneEvent | null) => {
       if (!event) return
       const clockTime = performance.now() / 1000
-      judgement = JUDGEMENT_TEXT[event.type]
-      judgementUntil = clockTime + 0.45
-      scene.addTrail(event.lane, event.type !== 'miss', clockTime)
+      if (event.type === 'miss') scene.missEffect(event.lane)
+      else scene.hitEffect(event.lane, event.type === 'perfect', clockTime)
+
+      if (event.milestone) showBanner(PRAISE[event.milestone], `${event.milestone} подряд`, false)
+      if (event.warning) showBanner('СОБЕРИТЕСЬ!', `${MISS_WARNING_STREAK} промаха подряд`, true)
+
+      nextIdRef.current += 1
+      const popup: Popup = {
+        id: nextIdRef.current,
+        lane: event.lane,
+        type: event.type,
+        text: event.type === 'miss' ? 'мимо' : `+${event.points}`,
+      }
+      setPopups((previous) => [...previous, popup].slice(-MAX_POPUPS))
     }
     eventHandlerRef.current = handleEvent
 
@@ -182,36 +270,38 @@ export function LanesApp() {
         const now = performance.now()
         if (now - lastHudAt > 80) {
           lastHudAt = now
-          if (clockTime > judgementUntil) judgement = ''
-          const zone = activeShakeZone(game, time)
+          const hasJudgedNotes = game.perfects + game.goods + game.misses > 0
           setHud({
             score: game.score,
             combo: game.combo,
             multiplier: multiplier(game),
+            multiplierFill: multiplierProgress(game),
             energy: game.energy,
             time,
-            judgement,
-            shake: zone ? Math.min(1, game.shakeCounts[zone.id] / zone.target) : null,
+            accuracyPercent: hasJudgedNotes ? Math.round(accuracy(game) * 100) : 100,
+            isInDanger: game.energy < LOW_ENERGY || game.missStreak >= MISS_WARNING_STREAK,
           })
         }
         if (game.failed || !player.isPlaying) finishRef.current()
       } else if (currentScreen === 'menu') {
         features.time = time
-        features.bass = 0.2
+        features.energy = time * 0.3
+        features.bass = 0.3 + 0.15 * Math.sin(clockTime * 1.5)
         features.beatPulse = 0
       }
 
-      scene.setClipOptions(current.look, current.clipBrightness)
+      scene.setClipOptions(current.look, current.clipBrightness, current.laneContrast)
       const inMenu = currentScreen === 'menu'
       scene.render(
         features,
         videoRef.current,
-        game && !inMenu ? game.level.notes : [],
+        game && !inMenu ? game.notes : [],
         game ? game.firstNote : 0,
         game ? game.judged : NO_JUDGED,
         pressedLanesRef.current,
         current.approachSec,
         clockTime,
+        game ? multiplier(game) : 1,
         !inMenu,
       )
       frameId = requestAnimationFrame(drawFrame)
@@ -254,17 +344,13 @@ export function LanesApp() {
     lane(lane: number) {
       const time = playingTime()
       const game = gameRef.current
+      sceneRef.current?.pressEffect(lane)
       if (time !== null && game) eventHandlerRef.current(pressLane(game, time, lane))
     },
     swipe(direction: number) {
       const time = playingTime()
       const game = gameRef.current
       if (time !== null && game) eventHandlerRef.current(pressSwipe(game, time, direction))
-    },
-    shake() {
-      const time = playingTime()
-      const game = gameRef.current
-      if (time !== null && game) registerShake(game, time)
     },
   })
 
@@ -280,36 +366,33 @@ export function LanesApp() {
       }
       if (event.code === 'ArrowLeft') handlersRef.current.swipe(-1)
       if (event.code === 'ArrowRight') handlersRef.current.swipe(1)
-      if (event.code === 'Space') {
-        event.preventDefault()
-        handlersRef.current.shake()
-      }
     }
     const onKeyUp = (event: KeyboardEvent) => {
       const lane = LANE_KEYS[event.code]
       if (lane !== undefined) pressedLanesRef.current[lane] = false
-    }
-    // Тряска мышью: считаем каждую смену направления движения влево-вправо
-    const onMouseMove = (event: MouseEvent) => {
-      if (Math.abs(event.movementX) < SHAKE_MIN_MOVE_PX) return
-      const direction = Math.sign(event.movementX)
-      if (direction !== lastMouseDirectionRef.current) handlersRef.current.shake()
-      lastMouseDirectionRef.current = direction
     }
     const onVisibilityChange = () => {
       if (document.hidden && liveRef.current.screen === 'playing') pauseRef.current()
     }
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
-    window.addEventListener('mousemove', onMouseMove)
     document.addEventListener('visibilitychange', onVisibilityChange)
     return () => {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
-      window.removeEventListener('mousemove', onMouseMove)
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }, [])
+
+  /** Клик по экрану тоже нажимает дорожку: она выбирается по положению курсора. */
+  const handlePointerDown = (event: PointerEvent) => {
+    const canvas = canvasRef.current
+    const scene = sceneRef.current
+    if (!canvas || !scene || screen !== 'playing') return
+    const box = canvas.getBoundingClientRect()
+    const x = (event.clientX - (box.left + box.width / 2)) / (box.height / 2)
+    handlersRef.current.lane(scene.laneAt(x))
+  }
 
   const attachClip = (file: File) => {
     if (clipUrl) URL.revokeObjectURL(clipUrl)
@@ -355,6 +438,8 @@ export function LanesApp() {
     const difficulty = findDifficulty(settings.difficulty)
     gameRef.current = createLaneGame(generateLaneLevel(analysis, difficulty), difficulty)
     setHud(EMPTY_HUD)
+    setBanner(null)
+    setPopups([])
     player.setVolume(settings.volume)
     player.seek(0)
     if (videoRef.current && clipUrl) videoRef.current.currentTime = 0
@@ -364,50 +449,66 @@ export function LanesApp() {
 
   const update = (patch: Partial<Settings>) => setSettings({ ...settings, ...patch })
   const duration = analysis?.duration ?? 0
+  const trackProgress = duration > 0 ? Math.min(1, hud.time / duration) : 0
 
   return (
-    <div className="game">
+    <div className="game" onPointerDown={handlePointerDown}>
       <canvas className="game-canvas" ref={canvasRef} />
       {/* Звук идёт через Web Audio, а видео только даёт кадры, поэтому оно без звука */}
       <video ref={videoRef} src={clipUrl || undefined} muted playsInline preload="auto" hidden />
 
       {(screen === 'playing' || screen === 'paused') && (
-        <div className="hud">
-          <div className="hud-top">
-            <div className="hud-block">
-              <span className="hud-label">Очки</span>
-              <strong className="hud-score">{hud.score.toLocaleString('ru-RU')}</strong>
-            </div>
-            <div className="hud-block hud-center">
-              <span className="hud-label">Энергия</span>
-              <div className="energy">
-                <div style={{ width: `${hud.energy * 100}%` }} />
+        <div className={`hud tier-${hud.multiplier} ${hud.isInDanger ? 'is-danger' : ''}`}>
+          <div className="track-progress">
+            <div style={{ width: `${trackProgress * 100}%` }} />
+          </div>
+
+          <div className="side-panel side-left">
+            <span className="hud-label">Очки</span>
+            <strong className="hud-score">{hud.score.toLocaleString('ru-RU')}</strong>
+            <span className="hud-label">Точность {hud.accuracyPercent}%</span>
+            <span className="hud-label">
+              {formatTime(hud.time)} / {formatTime(duration)}
+            </span>
+          </div>
+
+          <div className="side-panel side-right">
+            <span className="hud-label">Комбо</span>
+            {/* key заново запускает анимацию на каждой ноте */}
+            <strong className="combo-number" key={hud.combo}>
+              {hud.combo}
+            </strong>
+            <div className="multiplier">
+              <strong key={hud.multiplier}>×{hud.multiplier}</strong>
+              <div className="multiplier-bar">
+                <div style={{ width: `${hud.multiplierFill * 100}%` }} />
               </div>
-              <span className="hud-time">
-                {formatTime(hud.time)} / {formatTime(duration)}
-              </span>
             </div>
-            <div className="hud-block hud-right">
-              <span className="hud-label">Комбо</span>
-              <strong className="hud-score">
-                {hud.combo} <small>×{hud.multiplier}</small>
-              </strong>
+            <span className="hud-label">Энергия</span>
+            <div className="energy">
+              <div style={{ width: `${hud.energy * 100}%` }} />
             </div>
           </div>
 
-          {hud.shake !== null ? (
-            <div className="shake-prompt">
-              <strong>ВСТРЯСКА</strong>
-              <span>Трясите мышь влево-вправо или часто жмите пробел</span>
-              <div className="energy">
-                <div style={{ width: `${hud.shake * 100}%` }} />
-              </div>
+          {banner && (
+            <div className={`banner ${banner.isWarning ? 'is-warning' : ''}`} key={banner.id}>
+              <strong>{banner.text}</strong>
+              <span>{banner.detail}</span>
             </div>
-          ) : (
-            <div className="judgement">{hud.judgement}</div>
           )}
 
-          <div className="hud-hint">A S D — дорожки · ← → — стрелки · Esc — пауза</div>
+          {popups.map((popup) => (
+            <span
+              key={popup.id}
+              className={`score-popup is-${popup.type}`}
+              style={{ left: `calc(50% + ${(popup.lane - 1) * POPUP_LANE_STEP_VH}vh)` }}
+              onAnimationEnd={() => setPopups((previous) => previous.filter((item) => item.id !== popup.id))}
+            >
+              {popup.text}
+            </span>
+          ))}
+
+          <div className="hud-hint">A S D или клик по дорожке · ← → — стрелки · Esc — пауза</div>
         </div>
       )}
 
@@ -497,6 +598,19 @@ export function LanesApp() {
             </label>
             <label className="slider">
               <span>
+                Контраст дорожек <output>{Math.round(settings.laneContrast * 100)}%</output>
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={settings.laneContrast}
+                onChange={(event) => update({ laneContrast: Number(event.target.value) })}
+              />
+            </label>
+            <label className="slider">
+              <span>
                 Скорость нот <output>{settings.approachSec.toFixed(1)} с</output>
               </span>
               <input
@@ -549,9 +663,9 @@ export function LanesApp() {
           </button>
 
           <ul className="legend">
-            <li>Круг: клавиша дорожки A, S или D</li>
-            <li>Стрелка: ← или → в ту же сторону</li>
-            <li>Встряска: тряска мышью или пробел</li>
+            <li>Круг: клавиша дорожки A, S, D или клик</li>
+            <li>Жёлтая стрелка: ← или → в ту же сторону</li>
+            <li>Серия нот поднимает множитель до ×4</li>
           </ul>
         </main>
       )}
@@ -573,12 +687,17 @@ export function LanesApp() {
 
       {screen === 'results' && result && (
         <div className="overlay" data-testid="results">
-          <h2>{result.failed ? 'Энергия закончилась' : 'Трек пройден'}</h2>
+          <h2>{resultTitle(result)}</h2>
           <div className="rank">{result.rank}</div>
+          {result.isNewBest && <div className="new-best">Новый рекорд!</div>}
           <dl className="stats">
             <div>
               <dt>Очки</dt>
               <dd>{result.score.toLocaleString('ru-RU')}</dd>
+            </div>
+            <div>
+              <dt>Рекорд</dt>
+              <dd>{result.bestScore.toLocaleString('ru-RU')}</dd>
             </div>
             <div>
               <dt>Точность</dt>
@@ -587,6 +706,16 @@ export function LanesApp() {
             <div>
               <dt>Лучшее комбо</dt>
               <dd>{result.maxCombo}</dd>
+            </div>
+            <div>
+              <dt>Точно / хорошо</dt>
+              <dd>
+                {result.perfects} / {result.goods}
+              </dd>
+            </div>
+            <div>
+              <dt>Промахи</dt>
+              <dd>{result.misses}</dd>
             </div>
           </dl>
           <button className="start-button" onClick={startGame}>

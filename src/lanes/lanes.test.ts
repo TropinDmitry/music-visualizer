@@ -1,16 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import { analyzeAudio, mixToMono } from '../audio/analyzer.ts'
 import { synthesizeDemoTrack } from '../audio/demoTrack.ts'
-import { DIFFICULTIES, findDifficulty, generateLaneLevel, type LaneLevel } from './level.ts'
+import { DIFFICULTIES, findDifficulty, generateLaneLevel, type LaneNote } from './level.ts'
 import {
   accuracy,
   createLaneGame,
   GOOD_WINDOW_SEC,
+  MISS_WARNING_STREAK,
+  multiplierProgress,
   playAutopilot,
   pressLane,
   pressSwipe,
   rank,
-  registerShake,
   stepLanes,
 } from './rules.ts'
 
@@ -19,6 +20,13 @@ const analysis = analyzeAudio(mixToMono([demo.left, demo.right]), demo.sampleRat
 const hard = findDifficulty('hard')
 const easy = findDifficulty('easy')
 
+/** Ряд обычных нот на первой дорожке: по одной в секунду. */
+function tapRow(count: number): LaneNote[] {
+  const notes: LaneNote[] = []
+  for (let i = 0; i < count; i++) notes.push({ id: i, time: i + 1, lane: 0, kind: 'tap', direction: 0 })
+  return notes
+}
+
 describe('generateLaneLevel', () => {
   it('один трек всегда даёт один уровень', () => {
     expect(generateLaneLevel(analysis, hard)).toEqual(generateLaneLevel(analysis, hard))
@@ -26,7 +34,7 @@ describe('generateLaneLevel', () => {
 
   it('используются все три дорожки и нет трёх нот подряд на одной', () => {
     for (const difficulty of DIFFICULTIES) {
-      const { notes } = generateLaneLevel(analysis, difficulty)
+      const notes = generateLaneLevel(analysis, difficulty)
       expect(new Set(notes.map((note) => note.lane)).size).toBe(3)
       for (let i = 2; i < notes.length; i++) {
         const sameThree = notes[i].lane === notes[i - 1].lane && notes[i].lane === notes[i - 2].lane
@@ -36,27 +44,13 @@ describe('generateLaneLevel', () => {
   })
 
   it('есть свайпы в обе стороны', () => {
-    const swipes = generateLaneLevel(analysis, hard).notes.filter((note) => note.kind === 'swipe')
+    const swipes = generateLaneLevel(analysis, hard).filter((note) => note.kind === 'swipe')
     expect(new Set(swipes.map((note) => note.direction))).toEqual(new Set([-1, 1]))
   })
 
-  it('внутри зоны встряски нот нет', () => {
-    const level = generateLaneLevel(analysis, hard)
-    expect(level.shakeZones.length).toBeGreaterThan(0)
-    for (const zone of level.shakeZones) {
-      for (const note of level.notes) {
-        expect(note.time < zone.start || note.time > zone.end).toBe(true)
-      }
-    }
-  })
-
-  it('в коротком треке встряски нет, в тишине нет ничего', () => {
-    const short = synthesizeDemoTrack(12)
-    const shortAnalysis = analyzeAudio(mixToMono([short.left, short.right]), short.sampleRate)
-    expect(generateLaneLevel(shortAnalysis, hard).shakeZones).toEqual([])
-
+  it('в тишине нот нет', () => {
     const silence = analyzeAudio(new Float32Array(44100 * 4), 44100)
-    expect(generateLaneLevel(silence, hard)).toEqual({ notes: [], shakeZones: [] })
+    expect(generateLaneLevel(silence, hard)).toEqual([])
   })
 })
 
@@ -79,9 +73,7 @@ describe('смена бита посреди трека', () => {
   }
 
   it('после смены бита нот становится больше', () => {
-    const switched = analyzeAudio(beatSwitchTrack(), 44100)
-    const { notes } = generateLaneLevel(switched, findDifficulty('normal'))
-
+    const notes = generateLaneLevel(analyzeAudio(beatSwitchTrack(), 44100), findDifficulty('normal'))
     const before = notes.filter((note) => note.time >= 5 && note.time < 18).length
     const after = notes.filter((note) => note.time >= 22 && note.time < 35).length
     expect(after).toBeGreaterThan(before * 1.5)
@@ -89,14 +81,11 @@ describe('смена бита посреди трека', () => {
 })
 
 describe('правила', () => {
-  const level: LaneLevel = {
-    notes: [
-      { id: 0, time: 1, lane: 0, kind: 'tap', direction: 0 },
-      { id: 1, time: 2, lane: 1, kind: 'swipe', direction: 1 },
-      { id: 2, time: 3, lane: 2, kind: 'tap', direction: 0 },
-    ],
-    shakeZones: [{ id: 0, start: 4, end: 7, target: 3 }],
-  }
+  const level: LaneNote[] = [
+    { id: 0, time: 1, lane: 0, kind: 'tap', direction: 0 },
+    { id: 1, time: 2, lane: 1, kind: 'swipe', direction: 1 },
+    { id: 2, time: 3, lane: 2, kind: 'tap', direction: 0 },
+  ]
 
   it('нажатие на нужной дорожке засчитывается, на чужой нет', () => {
     const game = createLaneGame(level, easy)
@@ -120,23 +109,29 @@ describe('правила', () => {
     expect(game.combo).toBe(0)
   })
 
-  it('встряска приносит бонус только при достаточном числе движений', () => {
-    const done = createLaneGame({ notes: [], shakeZones: level.shakeZones }, easy)
-    registerShake(done, 3) // вне зоны не считается
-    for (let i = 0; i < 3; i++) registerShake(done, 5)
-    expect(stepLanes(done, 7)[0].type).toBe('shakeDone')
-    expect(done.score).toBe(1000)
-    expect(stepLanes(done, 8)).toEqual([])
+  it('круглое значение комбо отмечается один раз', () => {
+    const notes = tapRow(11)
+    const game = createLaneGame(notes, easy)
+    const milestones: number[] = []
+    for (const note of notes) {
+      const event = pressLane(game, note.time, 0)
+      if (event && event.milestone) milestones.push(event.milestone)
+    }
+    expect(milestones).toEqual([10])
+    expect(multiplierProgress(game)).toBeCloseTo(0.1)
+  })
 
-    const lazy = createLaneGame({ notes: [], shakeZones: level.shakeZones }, easy)
-    registerShake(lazy, 5)
-    expect(stepLanes(lazy, 7)).toEqual([])
-    expect(lazy.score).toBe(0)
+  it('предупреждение срабатывает один раз за серию промахов и сбрасывается попаданием', () => {
+    const game = createLaneGame(tapRow(6), easy)
+    const events = stepLanes(game, 5.5)
+    expect(events.filter((event) => event.warning).length).toBe(1)
+    expect(game.missStreak).toBeGreaterThanOrEqual(MISS_WARNING_STREAK)
+    pressLane(game, 6, 0)
+    expect(game.missStreak).toBe(0)
   })
 
   it('автопилот проходит сложный уровень без промахов даже при редких кадрах', () => {
-    const generated = generateLaneLevel(analysis, hard)
-    const game = createLaneGame(generated, hard)
+    const game = createLaneGame(generateLaneLevel(analysis, hard), hard)
     for (let time = 0; time <= analysis.duration + 1; time += 0.5) {
       playAutopilot(game, time)
       stepLanes(game, time)
@@ -144,16 +139,13 @@ describe('правила', () => {
     expect(game.misses).toBe(0)
     expect(accuracy(game)).toBe(1)
     expect(rank(game)).toBe('S')
-    expect(game.finishedZones.size).toBe(generated.shakeZones.length)
   })
 
   it('на лёгкой проиграть нельзя, на сложной можно', () => {
-    const notes = []
-    for (let i = 0; i < 20; i++) notes.push({ id: i, time: i, lane: 0, kind: 'tap' as const, direction: 0 })
-    const safe = createLaneGame({ notes, shakeZones: [] }, easy)
+    const safe = createLaneGame(tapRow(20), easy)
     stepLanes(safe, 100)
     expect(safe.failed).toBe(false)
-    const risky = createLaneGame({ notes, shakeZones: [] }, hard)
+    const risky = createLaneGame(tapRow(20), hard)
     stepLanes(risky, 100)
     expect(risky.failed).toBe(true)
   })
