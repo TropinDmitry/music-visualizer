@@ -30,8 +30,10 @@ const LOOK_NUMBERS: Record<ClipLook, number> = { outline: 0, duotone: 1, comic: 
 const TRACK_COLOR = '#2fd8cf'
 const LANE_COLORS = [TRACK_COLOR, TRACK_COLOR, TRACK_COLOR]
 const TAP_COLOR = '#b84dff'
-/** Тёмный металл корпуса: блики на нём рисует свет сцены. */
-const PLATFORM_METAL_COLOR = '#55615f'
+/** Почти чёрный глянцевый корпус: на нём сильнее читается светящееся кольцо. */
+const PLATFORM_BODY_COLOR = '#1b2428'
+/** Свет в кнопке в покое: она горит всегда, как лампа, а на нажатии ярче. */
+const PLATFORM_IDLE_LIGHT = 0.5
 const SPECIAL_COLOR = '#ffc933'
 const LANE_KEYS = ['A', 'S', 'D']
 /** Цвет дорожек на множителях ×1…×4: игра явно меняется, пока серия растёт. */
@@ -442,7 +444,7 @@ function createPlatformGeometry(): THREE.BufferGeometry {
   return geometry
 }
 
-/** Лицевая панель кнопки: глубина к центру, тонкие круги и насечки по краю. */
+/** Лицевая панель кнопки: как матовая лампа, ярче к центру. Цвет добавляется в игре. */
 function createPlatformFaceTexture(): THREE.CanvasTexture {
   const size = 256
   const center = size / 2
@@ -451,35 +453,15 @@ function createPlatformFaceTexture(): THREE.CanvasTexture {
   canvas.height = size
   const ctx = canvas.getContext('2d')
   if (ctx) {
-    const depth = ctx.createRadialGradient(center, center * 0.8, 10, center, center, center)
-    depth.addColorStop(0, '#5a6a68')
-    depth.addColorStop(0.55, '#26302f')
-    depth.addColorStop(1, '#0c1211')
-    ctx.fillStyle = depth
+    const lamp = ctx.createRadialGradient(center, center, 8, center, center, center)
+    lamp.addColorStop(0, '#ffffff')
+    lamp.addColorStop(0.45, '#8f9a9a')
+    lamp.addColorStop(0.85, '#3a4344')
+    lamp.addColorStop(1, '#1a2022')
+    ctx.fillStyle = lamp
     ctx.beginPath()
     ctx.arc(center, center, center - 1, 0, Math.PI * 2)
     ctx.fill()
-
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)'
-    ctx.lineWidth = 2
-    for (const radius of [0.5, 0.72]) {
-      ctx.beginPath()
-      ctx.arc(center, center, center * radius, 0, Math.PI * 2)
-      ctx.stroke()
-    }
-
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)'
-    ctx.lineWidth = 3
-    const ticks = 48
-    for (let i = 0; i < ticks; i++) {
-      const angle = (i / ticks) * Math.PI * 2
-      const inner = center * (i % 4 === 0 ? 0.82 : 0.87)
-      const outer = center * 0.93
-      ctx.beginPath()
-      ctx.moveTo(center + Math.cos(angle) * inner, center + Math.sin(angle) * inner)
-      ctx.lineTo(center + Math.cos(angle) * outer, center + Math.sin(angle) * outer)
-      ctx.stroke()
-    }
   }
   const texture = new THREE.CanvasTexture(canvas)
   texture.colorSpace = THREE.NoColorSpace
@@ -894,18 +876,20 @@ export class LaneScene {
     group.position.y = HIT_Y
     group.rotation.x = NOTE_TILT - Math.PI / 2
 
-    const body = new THREE.Mesh(createPlatformGeometry(), createNoteMaterial(PLATFORM_METAL_COLOR))
+    const body = new THREE.Mesh(createPlatformGeometry(), createNoteMaterial(PLATFORM_BODY_COLOR))
 
     const neonMaterial = createNoteMaterial(LANE_COLORS[lane], false)
     this.ringColors.push(neonMaterial.uniforms.uColor.value)
-    const neon = new THREE.Mesh(new THREE.TorusGeometry(0.185, 0.011, 12, 96), neonMaterial)
-    neon.position.z = 0.09
+    const neon = new THREE.Mesh(new THREE.TorusGeometry(0.176, 0.025, 20, 96), neonMaterial)
+    neon.position.z = 0.085
 
     const faceMaterial = new THREE.MeshBasicMaterial({
+      color: LANE_COLORS[lane],
       map: createPlatformFaceTexture(),
       transparent: true,
       depthTest: false,
     })
+    this.lightMaterials.push(faceMaterial)
     const face = new THREE.Mesh(new THREE.CircleGeometry(0.152, 64), faceMaterial)
     face.position.z = 0.032
 
@@ -913,13 +897,14 @@ export class LaneScene {
       color: LANE_COLORS[lane],
       map: createHaloTexture(),
       transparent: true,
-      opacity: 0.16,
+      opacity: PLATFORM_IDLE_LIGHT,
       depthTest: false,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     })
     this.lightMaterials.push(light)
-    const glow = new THREE.Mesh(new THREE.PlaneGeometry(0.42, 0.42), light)
+    // Ореол шире корпуса: кнопка подсвечивает дорожку вокруг себя
+    const glow = new THREE.Mesh(new THREE.PlaneGeometry(0.72, 0.72), light)
     glow.position.z = 0.06
 
     const label = new THREE.Mesh(
@@ -1172,7 +1157,8 @@ export class LaneScene {
       target.jolt *= fade
       target.group.position.x = this.laneX(lane) + Math.sin(target.jolt * 18) * 0.03 * target.jolt
       target.group.scale.setScalar(target.squash * (this.spread / LANE_SPREAD))
-      target.light.opacity = Math.max(isHolding ? 0.85 : pressedLanes[lane] ? 0.5 : 0.16, target.light.opacity * fade)
+      const restLight = isHolding ? 1 : pressedLanes[lane] ? 0.85 : PLATFORM_IDLE_LIGHT
+      target.light.opacity = Math.max(restLight, target.light.opacity * fade)
     }
   }
 
