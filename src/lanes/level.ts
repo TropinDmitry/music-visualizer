@@ -132,6 +132,8 @@ const EVEN_GAP_TOLERANCE_SEC = 0.04
 /** В активной части порог ниже: нотами становятся и звуки потише, игра идёт бодрее. */
 const ACTIVE_SHARE_DROP = 0.2
 const LEAD_IN_SEC = 1.5
+/** Раньше этого нот нет: песня только началась. */
+const FIRST_NOTE_SEC = 3
 const TAIL_FRAMES = 15
 /** Вокруг серии стрелок игра освобождает место: руке нужно время перейти на другие клавиши. */
 const ARROW_CLEAR_SEC = 0.3
@@ -198,7 +200,9 @@ export function generateLaneLevel(
   const picked = pickFramesWithMoments(analysis, difficulty, moments, focus, intensity, trace)
   const chains = focus === 'voice' ? [] : [...splitPulses(pulses), ...parts.map((part) => part.chain)]
   const { frames, ladder } = arrangeRhythm(picked, chains, analysis.fps, difficulty)
-  const allowed = frames.filter((frame) => isAllowed(frame / analysis.fps, moments))
+  // Сетка ритма начинается с нуля, а человеку нужно время взять руки на клавиши
+  const firstFrame = FIRST_NOTE_SEC * analysis.fps
+  const allowed = frames.filter((frame) => frame >= firstFrame && isAllowed(frame / analysis.fps, moments))
   if (trace) trace.parts = parts
   const ladderLanes = chooseLadderLanes(ladder, analysis.fps)
   const lanes = chooseLanes(analysis, allowed)
@@ -223,9 +227,10 @@ export function generateLaneLevel(
   const withPairs = addPairs(withArrows, difficulty, analysis, intensity, isLadder)
   const withSustains = addSustainHolds(withPairs, difficulty, sustains)
   const withHolds = addHolds(withSustains, difficulty, moments, isLadder)
-  const withAccents = addAccents(avoidTriples(withHolds, isLadder), moments, sections, sustains)
+  const withAccents = addAccents(withHolds, moments, sections, sustains)
   if (trace) trace.beforeLimit = withAccents
-  return limitDensity(withAccents, difficulty)
+  // Последним: предыдущие шаги убирают ноты, и соседями могут оказаться ноты с одной дорожки
+  return avoidTriples(limitDensity(withAccents, difficulty), isLadder)
 }
 
 /** Серия ровных чётких ударов, кандидат на стрелки. */
