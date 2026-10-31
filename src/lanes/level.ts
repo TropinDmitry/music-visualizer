@@ -79,15 +79,11 @@ export const DIFFICULTIES: Difficulty[] = [
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
 const STAR_EVERY = 17
-/** Примерно через столько обычных нот появляется нота с лучом. */
-const HOLD_EVERY = 14
-/** В спокойной части звук тянется, поэтому лучи вдвое чаще. */
-const HOLD_EVERY_CALM = 6
-const CALM_LEVEL = 0.45
+/** Короткий луч ставим, только если после ноты правда свободно столько секунд. */
 const HOLD_MIN_SEC = 0.9
-const HOLD_MAX_SEC = 3
+const HOLD_MAX_SEC = 2
 /** Луч заканчивается чуть раньше следующей ноты, чтобы руке хватило времени. */
-const HOLD_END_GAP_SEC = 0.1
+const HOLD_END_GAP_SEC = 0.25
 /** Последние секунды разгона, где ноты идут чаще. */
 const BUILDUP_RUSH_SEC = 2.5
 const BUILDUP_RUSH_GAP = 0.6
@@ -125,9 +121,13 @@ const ARROW_RUN_GAP_SEC = 0.32
 const ARROW_RUN_SPAN_SEC = 2.4
 const ARROW_RUN_END_SEC = 0.25
 const ARROW_RUN_AVOID_SEC = 5
-/** Длина лучей на протяжном звуке и воздух между ними. */
-const SUSTAIN_HOLD_MAX_SEC = 3
+/** Длинный звук играется одним лучом, но не бесконечным: рука должна отдыхать. */
+const SUSTAIN_HOLD_MAX_SEC = 6
 const SUSTAIN_HOLD_GAP_SEC = 0.35
+/** Пробел рядом с началом протяжного звука мешает: на этом месте главный луч. */
+const SPACE_SUSTAIN_CLEAR_SEC = 1.5
+/** Пара дорожек для протяжного звука: всегда одна и та же, крайние. */
+const SUSTAIN_LANES = [0, 2]
 /** Пробел событие редкое: два рядом обесценивают друг друга. */
 const MIN_SPACE_GAP_SEC = 8
 
@@ -166,9 +166,10 @@ export function generateLaneLevel(
   const withRuns = placeArrowRuns(notes, difficulty, sections)
   const withArrows = placeArrows(withRuns, difficulty, sections)
   const withPairs = addPairs(withArrows, difficulty, analysis, intensity)
-  const withHolds = addHolds(withPairs, difficulty, moments, analysis, intensity)
-  const withSustains = addSustainHolds(withHolds, difficulty, findSustains(analysis))
-  return limitDensity(addAccents(withSustains, moments, sections), difficulty)
+  const withHolds = addHolds(withPairs)
+  const sustains = findSustains(analysis)
+  const withSustains = addSustainHolds(withHolds, difficulty, sustains)
+  return limitDensity(addAccents(withSustains, moments, sections, sustains), difficulty)
 }
 
 /**
@@ -208,21 +209,22 @@ function placeArrowRuns(notes: LaneNote[], difficulty: Difficulty, sections: Sec
   return notes.filter((note) => !removed.has(note))
 }
 
-/** Протяжный звук играется лучами: отдельные ноты внутри него убираем. */
+/**
+ * Протяжный звук играется одним лучом от начала звука, на сложной сложности
+ * двумя на крайних дорожках. Отдельные ноты внутри убираем: рука занята лучом.
+ */
 function addSustainHolds(notes: LaneNote[], difficulty: Difficulty, sustains: Moment[]): LaneNote[] {
   let result = notes
   const holds: LaneNote[] = []
-  let lane = 0
   for (const sustain of sustains) {
-    result = result.filter((note) => note.time < sustain.start || note.time > sustain.end + ACCENT_CLEAR_SEC)
+    const start = sustain.start - ACCENT_CLEAR_SEC
+    result = result.filter((note) => note.time < start || note.time > sustain.end + ACCENT_CLEAR_SEC)
+
     let time = sustain.start
     while (sustain.end - time >= HOLD_MIN_SEC) {
       const duration = Math.min(SUSTAIN_HOLD_MAX_SEC, sustain.end - time)
-      holds.push({ id: 0, time, lane, kind: 'hold', direction: 0, duration })
-      if (difficulty.doubleHolds) {
-        holds.push({ id: 0, time, lane: (lane + 2) % 3, kind: 'hold', direction: 0, duration })
-      }
-      lane = (lane + 1) % 3
+      const lanes = difficulty.doubleHolds ? SUSTAIN_LANES : [1]
+      for (const lane of lanes) holds.push({ id: 0, time, lane, kind: 'hold', direction: 0, duration })
       time += duration + SUSTAIN_HOLD_GAP_SEC
     }
   }
@@ -506,7 +508,12 @@ function markLastNotesBeforePauses(notes: LaneNote[], moments: Moment[]): void {
  * переходы получают парную ноту, но редко: выпадения баса внутри бита повторяются
  * каждые несколько секунд, и если отмечать все, акценты перестанут быть событием.
  */
-function addAccents(notes: LaneNote[], moments: Moment[], sections: Section[]): LaneNote[] {
+function addAccents(
+  notes: LaneNote[],
+  moments: Moment[],
+  sections: Section[],
+  sustains: Moment[],
+): LaneNote[] {
   const impacts = moments.filter((moment) => moment.kind === 'impact')
   // Сначала длинные паузы: возвращение музыки слышно точнее, чем граница части
   const candidates: number[] = []
@@ -519,7 +526,8 @@ function addAccents(notes: LaneNote[], moments: Moment[], sections: Section[]): 
 
   const spaceTimes: number[] = []
   for (const time of candidates) {
-    if (!spaceTimes.some((other) => Math.abs(other - time) < MIN_SPACE_GAP_SEC)) spaceTimes.push(time)
+    const isTaken = spaceTimes.some((other) => Math.abs(other - time) < MIN_SPACE_GAP_SEC)
+    if (!isTaken && !isNearSustain(time, sustains)) spaceTimes.push(time)
   }
 
   const result = [...notes]
@@ -529,6 +537,7 @@ function addAccents(notes: LaneNote[], moments: Moment[], sections: Section[]): 
   for (const impact of impacts) {
     const isNearSpace = spaceTimes.some((time) => Math.abs(time - impact.start) < MIN_ACCENT_GAP_SEC)
     if (isNearSpace || impact.start - lastAccent < MIN_ACCENT_GAP_SEC) continue
+    if (isNearSustain(impact.start, sustains)) continue
     lastAccent = impact.start
     result.push({ id: 0, time: impact.start, lane: 0, kind: 'accent', direction: 0 })
     result.push({ id: 0, time: impact.start, lane: 2, kind: 'accent', direction: 0 })
@@ -542,6 +551,14 @@ function addAccents(notes: LaneNote[], moments: Moment[], sections: Section[]): 
   })
   for (let i = 0; i < cleared.length; i++) cleared[i] = { ...cleared[i], id: i }
   return cleared
+}
+
+/** Время внутри протяжного участка или рядом с его началом. */
+function isNearSustain(time: number, sustains: Moment[]): boolean {
+  for (const sustain of sustains) {
+    if (time >= sustain.start - SPACE_SUSTAIN_CLEAR_SEC && time <= sustain.end) return true
+  }
+  return false
 }
 
 function nearestImpact(time: number, impacts: Moment[]): number {
@@ -558,64 +575,22 @@ function nearestImpact(time: number, impacts: Moment[]): number {
 }
 
 /**
- * Превращает часть кругов в ноты с лучом. Луч тянется до следующего удара,
- * поэтому конец удержания попадает в музыку. Ноты под лучом убираем: на сложной
- * сложности остаются только соседние дорожки, остальным руку нужно освободить.
+ * Короткий луч ставится только там, где после ноты и правда тихо: нота как бы
+ * звучит дальше. Никаких лучей по счётчику: такие не связаны со звуком.
  */
-function addHolds(
-  notes: LaneNote[],
-  difficulty: Difficulty,
-  moments: Moment[],
-  analysis: AudioAnalysis,
-  intensity: Float32Array,
-): LaneNote[] {
+function addHolds(notes: LaneNote[]): LaneNote[] {
   const result: LaneNote[] = []
-  let tapsSinceHold = 0
-  let i = 0
-
-  while (i < notes.length) {
+  for (let i = 0; i < notes.length; i++) {
     const note = notes[i]
-    tapsSinceHold += 1
-    const frame = Math.min(Math.round(note.time * analysis.fps), intensity.length - 1)
-    const holdEvery = intensity[frame] < CALM_LEVEL ? HOLD_EVERY_CALM : HOLD_EVERY
-    const canHold = tapsSinceHold >= holdEvery && note.kind === 'tap' && !isInRush(note.time, moments)
-    const endIndex = canHold ? findHoldEnd(notes, i, moments) : -1
-
-    if (endIndex === -1) {
-      result.push({ ...note, id: result.length })
-      i += 1
-      continue
+    const next = notes[i + 1]
+    const gap = next ? next.time - note.time : 0
+    if (note.kind === 'tap' && gap >= HOLD_MIN_SEC + HOLD_END_GAP_SEC) {
+      result.push({ ...note, kind: 'hold', duration: Math.min(HOLD_MAX_SEC, gap - HOLD_END_GAP_SEC) })
+    } else {
+      result.push(note)
     }
-
-    const duration = notes[endIndex].time - note.time - HOLD_END_GAP_SEC
-    result.push({ ...note, id: result.length, kind: 'hold', duration })
-    if (difficulty.id === 'hard') {
-      for (let j = i + 1; j < endIndex; j++) {
-        if (notes[j].lane !== note.lane) result.push({ ...notes[j], id: result.length })
-      }
-    }
-    tapsSinceHold = 0
-    i = endIndex
   }
   return result
-}
-
-/** Индекс ноты, на которой закончится луч, или -1, если подходящей нет. */
-function findHoldEnd(notes: LaneNote[], start: number, moments: Moment[]): number {
-  for (let j = start + 1; j < notes.length; j++) {
-    const gap = notes[j].time - notes[start].time
-    if (gap > HOLD_MAX_SEC) return -1
-    if (gap >= HOLD_MIN_SEC) return crossesMoment(notes[start].time, notes[j].time, moments) ? -1 : j
-  }
-  return -1
-}
-
-/** Луч не должен тянуться через паузу или взрыв: он перекроет сам момент. */
-function crossesMoment(from: number, to: number, moments: Moment[]): boolean {
-  for (const moment of moments) {
-    if (moment.kind !== 'buildup' && moment.start < to + ACCENT_CLEAR_SEC && moment.end > from) return true
-  }
-  return false
 }
 
 /** Для каждого удара считает «центр тяжести» спектра и делит удары на три равные группы. */

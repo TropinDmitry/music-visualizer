@@ -46,6 +46,9 @@ const INTENSITY_WINDOW_SEC = 5
 const SUSTAIN_STEP_SEC = 0.25
 const SUSTAIN_WINDOW_SEC = 1.5
 const SUSTAIN_MIN_SEC = 1.5
+/** Насколько позже найденного начала ещё может стоять удар, запустивший звук. */
+const SUSTAIN_START_SLACK_SEC = 0.1
+const SUSTAIN_MERGE_GAP_SEC = 1
 /** Меньше какой доли обычного числа ударов место считается протяжным. */
 const SUSTAIN_SPARSE_SHARE = 0.45
 const SUSTAIN_MIN_PRESENCE = 0.22
@@ -217,12 +220,36 @@ export function findSustains(analysis: AudioAnalysis): Moment[] {
     }
     let end = block
     while (end + 1 < blockCount && isSustained[end + 1]) end += 1
-    const start = (block * stepFrames) / fps
+    // Окно подсчёта ударов смотрит и назад, поэтому участок признаётся протяжным
+    // с опозданием на половину окна. Возвращаем начало к удару, с которого звук пошёл.
+    const detected = (block * stepFrames) / fps
+    const start = lastOnsetBefore(analysis, detected + SUSTAIN_START_SLACK_SEC, detected - SUSTAIN_WINDOW_SEC)
     const stop = ((end + 1) * stepFrames) / fps
     if (stop - start >= SUSTAIN_MIN_SEC) sustains.push({ kind: 'sustain', start, end: stop })
     block = end + 1
   }
-  return sustains
+  return mergeClose(sustains)
+}
+
+/** Последний удар на отрезке времени; если ударов нет, начало отрезка. */
+function lastOnsetBefore(analysis: AudioAnalysis, latest: number, earliest: number): number {
+  let found = Math.max(0, earliest + SUSTAIN_WINDOW_SEC / 2)
+  for (const onset of analysis.onsetTimes) {
+    if (onset > latest) break
+    if (onset >= earliest) found = onset
+  }
+  return found
+}
+
+/** Соседние протяжные участки с крошечным разрывом это один звук. */
+function mergeClose(sustains: Moment[]): Moment[] {
+  const merged: Moment[] = []
+  for (const sustain of sustains) {
+    const previous = merged[merged.length - 1]
+    if (previous && sustain.start - previous.end <= SUSTAIN_MERGE_GAP_SEC) previous.end = sustain.end
+    else merged.push({ ...sustain })
+  }
+  return merged
 }
 
 /** Сетка ритма на отрезке песни. Темп может меняться, поэтому отрезков много. */

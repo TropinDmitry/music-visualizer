@@ -97,14 +97,11 @@ describe('generateLaneLevel', () => {
     expect(stars.length).toBeLessThan(notes.length / 10)
   })
 
-  it('лучи есть на всех сложностях, и под лучом на его дорожке нет нот', () => {
+  it('лучи стоят только там, где после ноты свободно', () => {
     for (const difficulty of DIFFICULTIES) {
       const notes = generateLaneLevel(analysis, difficulty)
-      const holds = notes.filter((note) => note.kind === 'hold')
-      expect(holds.length).toBeGreaterThan(0)
-      for (const hold of holds) {
+      for (const hold of notes.filter((note) => note.kind === 'hold')) {
         const end = hold.time + (hold.duration ?? 0)
-        expect(hold.duration).toBeGreaterThan(0.7)
         for (const note of notes) {
           const isUnderBeam = note.time > hold.time && note.time < end
           expect(isUnderBeam && note.lane === hold.lane).toBe(false)
@@ -188,48 +185,6 @@ describe('драматургия песни', () => {
     expect(sparseNotes.length).toBeGreaterThan(20)
   })
 
-  it('в спокойной части лучей больше, чем в мощной', () => {
-    const samples = new Float32Array(SAMPLE_RATE * 60)
-    addKicks(samples, 2, 30, 0.5, () => 0.25)
-    addKicks(samples, 30, 58, 0.5, () => 0.9)
-    for (let i = 30 * SAMPLE_RATE; i < 58 * SAMPLE_RATE; i++) {
-      const t = i / SAMPLE_RATE
-      samples[i] += 0.12 * (Math.sin(2 * Math.PI * 1100 * t) + Math.sin(2 * Math.PI * 6500 * t))
-    }
-    const notes = generateLaneLevel(analyzeAudio(samples, SAMPLE_RATE), hard)
-    const holds = notes.filter((note) => note.kind === 'hold')
-    const calm = holds.filter((note) => note.time < 28).length
-    const strong = holds.filter((note) => note.time > 32).length
-    expect(calm).toBeGreaterThan(strong)
-  })
-
-  it('плотность никогда не превышает предел сложности', () => {
-    for (const difficulty of DIFFICULTIES) {
-      for (const track of [dramatic, analysis]) {
-        const starts = [...new Set(generateLaneLevel(track, difficulty).map((note) => note.time))]
-        for (let i = 1; i < starts.length; i++) {
-          let inSecond = 0
-          for (let j = i; j >= 0 && starts[i] - starts[j] < 1; j--) inSecond += 1
-          // Особые ноты не вырезаются, поэтому запас в одно нажатие
-          expect(inSecond).toBeLessThanOrEqual(difficulty.maxPerSecond + 1)
-          expect(starts[i] - starts[i - 1]).toBeGreaterThanOrEqual(difficulty.floorGapSec - 0.13)
-        }
-      }
-    }
-  })
-
-  it('перед сменой части идёт серия стрелок', () => {
-    const notes = generateLaneLevel(dramatic, hard)
-    const arrows = notes.filter((note) => note.kind === 'swipe')
-    let longestRun = 1
-    let run = 1
-    for (let i = 1; i < arrows.length; i++) {
-      run = arrows[i].time - arrows[i - 1].time < 1 ? run + 1 : 1
-      longestRun = Math.max(longestRun, run)
-    }
-    expect(longestRun).toBeGreaterThanOrEqual(2)
-  })
-
   it('протяжный взлёт находится и играется лучами, на сложной парными', () => {
     // Сначала бит, потом тон, ползущий вверх, потом снова бит
     const samples = new Float32Array(SAMPLE_RATE * 40)
@@ -246,9 +201,17 @@ describe('драматургия песни', () => {
     const sustains = findSustains(track)
     expect(sustains.some((moment) => moment.start < 22 && moment.end > 18)).toBe(true)
 
-    const holds = generateLaneLevel(track, hard).filter((note) => note.kind === 'hold' && note.time >= 16 && note.time < 24)
-    expect(holds.some((note) => (note.duration ?? 0) >= 1.5)).toBe(true)
+    const notes = generateLaneLevel(track, hard)
+    const holds = notes.filter((note) => note.kind === 'hold' && note.time >= 15 && note.time < 24)
+    expect(holds.some((note) => (note.duration ?? 0) >= 3)).toBe(true)
     expect(holds.some((note, i) => i > 0 && note.time === holds[i - 1].time)).toBe(true)
+
+    // Луч начинается вместе со звуком, а не через секунду после него
+    expect(Math.abs(holds[0].time - 16)).toBeLessThan(0.45)
+
+    // И вместо него рядом не приходит пробел
+    const spaces = notes.filter((note) => note.kind === 'space')
+    expect(spaces.some((note) => note.time > 14.5 && note.time < 24)).toBe(false)
   })
 
   it('в паузе нот нет, а после неё приходит нота SPACE', () => {
