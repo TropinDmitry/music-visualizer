@@ -7,5 +7,9 @@ export default defineConfig({
   build: {
     // Three.js сам по себе весит ~700 КБ (≈200 КБ в gzip) — это ожидаемо
     chunkSizeWarningLimit: 900,
+    // Две страницы: визуализатор и игра «Орбита»
+    rolldownOptions: {
+      input: { main: 'index.html', game: 'game.html' },
+    },
   },
 })
