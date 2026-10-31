@@ -62,6 +62,10 @@ const FLYING_ARROW_COLOR = '#ffffff'
 const MAX_FLYING_ARROWS = 6
 const ARROW_FLIGHT_SEC = 0.5
 const MAX_NOTES = 48
+const MAX_SPACE_BARS = 4
+/** Длинная нота шире всех трёх дорожек, в долях расстояния между ними. */
+const SPACE_BAR_WIDTH = 2.7
+const SPACE_BAR_DEPTH = 0.62
 const MAX_SPARKS = 160
 const SPARK_LIFETIME_SEC = 0.45
 const MAX_SHOCKWAVES = 8
@@ -84,6 +88,8 @@ const clipFragment = /* glsl */ `
   uniform float uFocus;
   uniform float uTension;
   uniform float uStillness;
+  uniform float uStreak;
+  uniform float uOverdrive;
   uniform float uSpread;
   uniform float uBundle;
   uniform float uBend;
@@ -216,7 +222,16 @@ const clipFragment = /* glsl */ `
     color *= 1.0 - 0.6 * uTension * edgeDark;
     color *= 1.0 - 0.5 * uStillness;
 
-    gl_FragColor = vec4(color * uDim, 1.0);
+    // Награда за серию: сверху, из точки схода дорожек, разгорается корона лучей.
+    // Она не зависит от яркости клипа: это сигнал игроку, а не часть видео.
+    vec2 fromTop = screen - uVanish;
+    float crownAngle = atan(fromTop.x, -fromTop.y);
+    float crownRays = pow(0.5 + 0.5 * sin(crownAngle * 16.0 + uTrackTime * 1.2), 5.0);
+    float crownFade = exp(-length(fromTop) * (2.6 - 1.3 * uStreak));
+    vec3 crownColor = mix(vec3(0.62, 0.28, 1.0), vec3(1.0, 0.78, 0.25), uOverdrive);
+    vec3 crown = crownColor * crownFade * uStreak * (0.3 + 0.8 * crownRays) * (0.75 + 0.45 * uBeat);
+
+    gl_FragColor = vec4(color * uDim + crown, 1.0);
   }
 `
 
@@ -236,6 +251,8 @@ const fanFragment = /* glsl */ `
   uniform float uBend;
   uniform float uTension;
   uniform float uStillness;
+  uniform float uStreak;
+  uniform float uOverdrive;
   uniform vec3 uBeams[6];
   uniform float uBeamHeld[6];
   varying vec2 vUv;
@@ -263,9 +280,10 @@ const fanFragment = /* glsl */ `
 
     // Бегущие блики внутри трубки показывают движение к игроку
     float distanceAway = 1.0 / closeness;
-    float pulse = smoothstep(0.8, 1.0, fract(distanceAway * 1.6 + uTrackTime * (1.4 + 2.5 * uTension)));
+    float pulse = smoothstep(0.8, 1.0, fract(distanceAway * 1.6 + uTrackTime * (1.4 + 2.5 * uTension + 1.5 * uStreak)));
 
-    vec3 laneColor = uLaneColors[lane];
+    // В суперрежиме дорожки становятся золотыми: это видно боковым зрением
+    vec3 laneColor = mix(uLaneColors[lane], vec3(1.0, 0.78, 0.25), uOverdrive * 0.85);
     float fade = smoothstep(0.0, 0.1, closeness);
 
     vec3 color = laneColor * (0.06 + 0.1 * uBeat + 0.28 * pulse);
@@ -274,7 +292,7 @@ const fanFragment = /* glsl */ `
     color = mix(color, laneColor * (0.82 + 0.5 * uTension), rail);
     alpha = max(alpha, rail * fade);
     color = mix(color, laneColor, halo * (1.0 - rail));
-    alpha = max(alpha, halo * (0.3 + 0.25 * uBeat) * fade);
+    alpha = max(alpha, halo * (0.3 + 0.25 * uBeat + 0.45 * uStreak) * fade);
 
     // Лучи нот с удержанием: сплошной поток света по оси трубки
     for (int i = 0; i < 6; i++) {
@@ -412,6 +430,34 @@ function createDishedCoinGeometry(): THREE.LatheGeometry {
   return new THREE.LatheGeometry(profile.reverse(), 48)
 }
 
+/** Рисунок длинной ноты: почти белая плашка с надписью. */
+function createSpaceTexture(): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas')
+  canvas.width = 512
+  canvas.height = 128
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height)
+    gradient.addColorStop(0, '#ffffff')
+    gradient.addColorStop(1, '#cfe9ff')
+    ctx.fillStyle = gradient
+    ctx.strokeStyle = '#6fb7ff'
+    ctx.lineWidth = 8
+    ctx.beginPath()
+    ctx.roundRect(6, 6, canvas.width - 12, canvas.height - 12, 40)
+    ctx.fill()
+    ctx.stroke()
+    ctx.font = '800 72px "Segoe UI", system-ui, sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle = '#0d3a5c'
+    ctx.fillText('SPACE', canvas.width / 2, canvas.height / 2 + 4)
+  }
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.NoColorSpace
+  return texture
+}
+
 /** Мягкое пятно света для ореола вокруг ноты. */
 function createHaloTexture(): THREE.CanvasTexture {
   const size = 96
@@ -537,6 +583,8 @@ export class LaneScene {
     uHitY: { value: HIT_Y },
     uTension: { value: 0 },
     uStillness: { value: 0 },
+    uStreak: { value: 0 },
+    uOverdrive: { value: 0 },
   }
   private readonly clipUniforms = {
     ...this.sharedUniforms,
@@ -565,6 +613,7 @@ export class LaneScene {
   private readonly tapNotes: THREE.InstancedMesh
   private readonly plainCoins: THREE.InstancedMesh
   private readonly noteHalos: THREE.InstancedMesh
+  private readonly spaceBars: THREE.Mesh[] = []
   private readonly swipeNotes: THREE.InstancedMesh
   private readonly starNotes: THREE.InstancedMesh
   private readonly noteShadows: THREE.InstancedMesh
@@ -643,6 +692,24 @@ export class LaneScene {
       // Без начального вызова setColorAt буфер цветов появится слишком поздно
       for (let i = 0; i < MAX_NOTES; i++) mesh.setColorAt(i, this.color.set('#ffffff'))
       this.scene.add(mesh)
+    }
+
+    const spaceMaterial = new THREE.MeshBasicMaterial({
+      map: createSpaceTexture(),
+      transparent: true,
+      depthTest: false,
+      side: THREE.DoubleSide,
+    })
+    const spaceGeometry = new THREE.PlaneGeometry(1, 1)
+    for (let i = 0; i < MAX_SPACE_BARS; i++) {
+      const bar = new THREE.Mesh(spaceGeometry, spaceMaterial)
+      // Лежит в плоскости дорожки, как и всё остальное
+      bar.rotation.x = NOTE_TILT - Math.PI / 2
+      bar.visible = false
+      bar.frustumCulled = false
+      bar.renderOrder = 2.9
+      this.spaceBars.push(bar)
+      this.scene.add(bar)
     }
 
     for (let i = 0; i < MAX_FLYING_ARROWS; i++) {
@@ -772,6 +839,13 @@ export class LaneScene {
     // Плавно, чтобы пауза не обрывала картинку рывком
     this.sharedUniforms.uTension.value += (tension - this.sharedUniforms.uTension.value) * 0.15
     this.sharedUniforms.uStillness.value += (stillness - this.sharedUniforms.uStillness.value) * 0.25
+  }
+
+  /** Сила серии 0..1 и суперрежим. Меняются плавно, чтобы награда разгоралась и гасла. */
+  setStreak(streak: number, isOverdrive: boolean): void {
+    this.sharedUniforms.uStreak.value += (streak - this.sharedUniforms.uStreak.value) * 0.06
+    const overdrive = isOverdrive ? 1 : 0
+    this.sharedUniforms.uOverdrive.value += (overdrive - this.sharedUniforms.uOverdrive.value) * 0.1
   }
 
   /** Взрыв песни: волны сразу от всех кнопок. Клип при этом не вспыхивает. */
@@ -940,6 +1014,7 @@ export class LaneScene {
     let tapCount = 0
     let plainCount = 0
     let haloCount = 0
+    let spaceCount = 0
     let swipeCount = 0
     let starCount = 0
     let shadowCount = 0
@@ -958,6 +1033,17 @@ export class LaneScene {
       // Размер зависит от расстояния между дорожками, поэтому в узком окне ноты меньше
       const size = NOTE_SIZE * (spacing / LANE_SPREAD)
 
+      if (note.kind === 'space') {
+        if (spaceCount < MAX_SPACE_BARS) {
+          const bar = this.spaceBars[spaceCount]
+          bar.position.set(0, y, 0)
+          bar.scale.set(spacing * SPACE_BAR_WIDTH, spacing * SPACE_BAR_DEPTH, 1)
+          bar.visible = true
+          spaceCount += 1
+        }
+        continue
+      }
+
       // Тень лежит на дорожке чуть ниже ноты и сплющена так же, как сама нота
       this.helper.position.set(x, y - size * 0.1, 0)
       this.helper.rotation.set(0, 0, 0)
@@ -973,8 +1059,7 @@ export class LaneScene {
         this.helper.scale.set(size * 1.7, size * 1.7 * PLANE_SQUASH, 1)
         this.helper.updateMatrix()
         this.noteHalos.setMatrixAt(haloCount, this.helper.matrix)
-        const isGolden = note.kind === 'star' || note.kind === 'accent'
-        this.noteHalos.setColorAt(haloCount, this.color.set(isGolden ? SPECIAL_COLOR : TAP_COLOR))
+        this.noteHalos.setColorAt(haloCount, this.color.set(note.kind === 'star' ? SPECIAL_COLOR : TAP_COLOR))
         haloCount += 1
       }
 
@@ -989,11 +1074,9 @@ export class LaneScene {
         this.starNotes.setColorAt(starCount, this.color.set(SPECIAL_COLOR))
         starCount += 1
       } else {
-        const isPlain = note.kind === 'swipe' || note.kind === 'accent'
-        if (isPlain) {
-          const coinColor = note.kind === 'swipe' ? COIN_WITH_ARROW_COLOR : SPECIAL_COLOR
+        if (note.kind === 'swipe') {
           this.plainCoins.setMatrixAt(plainCount, this.helper.matrix)
-          this.plainCoins.setColorAt(plainCount, this.color.set(coinColor))
+          this.plainCoins.setColorAt(plainCount, this.color.set(COIN_WITH_ARROW_COLOR))
           plainCount += 1
         } else {
           // Цвет такой ноты задаёт перелив в шейдере
@@ -1017,6 +1100,7 @@ export class LaneScene {
       if (shadowCount >= MAX_NOTES) break
     }
 
+    for (let i = spaceCount; i < MAX_SPACE_BARS; i++) this.spaceBars[i].visible = false
     this.tapNotes.count = tapCount
     this.plainCoins.count = plainCount
     this.noteHalos.count = haloCount

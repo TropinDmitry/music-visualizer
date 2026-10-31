@@ -1,6 +1,6 @@
 import type { AudioAnalysis } from '../audio/analyzer.ts'
-import { pickNoteFrames } from '../game/level.ts'
-import { findMoments, type Moment } from './structure.ts'
+import { beatWeight, pickNoteFrames } from '../game/level.ts'
+import { findMoments, songIntensity, type Moment } from './structure.ts'
 
 /**
  * Уровень для трёх дорожек. Дорожка выбирается по высоте звука: низкие удары
@@ -11,9 +11,10 @@ import { findMoments, type Moment } from './structure.ts'
 /**
  * tap — круг, swipe — стрелка, star — редкая золотая нота с удвоенными очками,
  * hold — нота с лучом: клавишу надо зажать и держать до конца луча,
- * accent — акцент на взрыве песни: две ноты сразу на крайних дорожках.
+ * accent — парная нота: две ноты сразу на разных дорожках,
+ * space — длинная нота на все дорожки: нажать пробел.
  */
-export type NoteKind = 'tap' | 'swipe' | 'star' | 'hold' | 'accent'
+export type NoteKind = 'tap' | 'swipe' | 'star' | 'hold' | 'accent' | 'space'
 
 export interface LaneNote {
   id: number
@@ -34,13 +35,15 @@ export interface Difficulty {
   minGapSec: number
   /** Каждая какая нота становится свайпом. */
   swipeEvery: number
+  /** В сильных частях песни каждая какая нота становится парной. 0 — парных нет. */
+  pairEvery: number
   canFail: boolean
 }
 
 export const DIFFICULTIES: Difficulty[] = [
-  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, swipeEvery: 12, canFail: false },
-  { id: 'normal', label: 'Средняя', minGapSec: 0.3, swipeEvery: 8, canFail: true },
-  { id: 'hard', label: 'Сложная', minGapSec: 0.18, swipeEvery: 6, canFail: true },
+  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, swipeEvery: 12, pairEvery: 0, canFail: false },
+  { id: 'normal', label: 'Средняя', minGapSec: 0.3, swipeEvery: 8, pairEvery: 11, canFail: true },
+  { id: 'hard', label: 'Сложная', minGapSec: 0.18, swipeEvery: 6, pairEvery: 7, canFail: true },
 ]
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
@@ -58,6 +61,11 @@ const BUILDUP_RUSH_GAP = 0.6
 const STAIRS = [0, 1, 2, 1]
 /** Вокруг акцента оставляем воздух, чтобы он прозвучал отдельно. */
 const ACCENT_CLEAR_SEC = 0.2
+/** Интервал между нотами умножается на это число в тихих и в сильных частях. */
+const CALM_GAP_FACTOR = 1.9
+const INTENSE_GAP_FACTOR = 0.7
+/** Выше этой силы песни редкие места заполняются дополнительными нотами. */
+const INTENSE_LEVEL = 0.55
 
 export function findDifficulty(id: DifficultyId): Difficulty {
   for (const difficulty of DIFFICULTIES) {
@@ -68,7 +76,8 @@ export function findDifficulty(id: DifficultyId): Difficulty {
 
 export function generateLaneLevel(analysis: AudioAnalysis, difficulty: Difficulty): LaneNote[] {
   const moments = findMoments(analysis)
-  const frames = pickFramesWithMoments(analysis, difficulty, moments)
+  const intensity = songIntensity(analysis)
+  const frames = pickFramesWithMoments(analysis, difficulty, moments, intensity)
   const lanes = chooseLanes(analysis, frames)
 
   const notes: LaneNote[] = []
@@ -93,12 +102,88 @@ export function generateLaneLevel(analysis: AudioAnalysis, difficulty: Difficult
   }
 
   markLastNotesBeforePauses(notes, moments)
-  return addAccents(addHolds(notes, difficulty, moments), moments)
+  const withPairs = addPairs(notes, difficulty, analysis, intensity)
+  return addAccents(addHolds(withPairs, difficulty, moments), moments)
+}
+
+/** Минимальный интервал между нотами в этом месте песни: в сильных частях короче. */
+function localGap(frame: number, minGapSec: number, intensity: Float32Array): number {
+  const factor = CALM_GAP_FACTOR + (INTENSE_GAP_FACTOR - CALM_GAP_FACTOR) * intensity[frame]
+  return minGapSec * factor
+}
+
+/** Отбирает удары: сначала важные, а частоту задаёт сила части песни. */
+function pickByIntensity(analysis: AudioAnalysis, difficulty: Difficulty, intensity: Float32Array): number[] {
+  const candidates = pickNoteFrames(analysis, difficulty.minGapSec * INTENSE_GAP_FACTOR * 0.8)
+  candidates.sort((a, b) => beatWeight(analysis, b) - beatWeight(analysis, a))
+
+  const picked: number[] = []
+  for (const frame of candidates) {
+    const gapFrames = localGap(frame, difficulty.minGapSec, intensity) * analysis.fps
+    let isFree = true
+    for (const other of picked) {
+      if (Math.abs(other - frame) < gapFrames) isFree = false
+    }
+    if (isFree) picked.push(frame)
+  }
+  picked.sort((a, b) => a - b)
+  return fillIntenseGaps(picked, analysis, difficulty, intensity)
+}
+
+/**
+ * В припеве удары сливаются, и нот выходит мало. Если между нотами слишком
+ * длинный промежуток, ставим ноту посередине: так ритм дробится вдвое и остаётся
+ * в такт, потому что соседние ноты уже стоят на ударах.
+ */
+function fillIntenseGaps(
+  frames: number[],
+  analysis: AudioAnalysis,
+  difficulty: Difficulty,
+  intensity: Float32Array,
+): number[] {
+  const result = [...frames]
+  for (let i = 0; i + 1 < frames.length; i++) {
+    const middle = Math.round((frames[i] + frames[i + 1]) / 2)
+    const wanted = localGap(middle, difficulty.minGapSec, intensity) * analysis.fps
+    const isLongGap = frames[i + 1] - frames[i] >= wanted * 2
+    if (intensity[middle] >= INTENSE_LEVEL && isLongGap) result.push(middle)
+  }
+  result.sort((a, b) => a - b)
+  return result
+}
+
+/** В сильных частях часть обычных нот становится парной: припев и на ощупь мощнее. */
+function addPairs(
+  notes: LaneNote[],
+  difficulty: Difficulty,
+  analysis: AudioAnalysis,
+  intensity: Float32Array,
+): LaneNote[] {
+  if (difficulty.pairEvery === 0) return notes
+  const result: LaneNote[] = []
+  let notesSincePair = 0
+  for (const note of notes) {
+    const frame = Math.min(Math.round(note.time * analysis.fps), intensity.length - 1)
+    if (intensity[frame] >= INTENSE_LEVEL) notesSincePair += 1
+    if (note.kind === 'tap' && notesSincePair >= difficulty.pairEvery) {
+      notesSincePair = 0
+      result.push({ ...note, kind: 'accent' })
+      result.push({ ...note, kind: 'accent', lane: (note.lane + 1 + (result.length % 2)) % 3 })
+    } else {
+      result.push(note)
+    }
+  }
+  return result
 }
 
 /** Отбирает удары с учётом драматургии: чаще на разгоне, ничего в паузе и у акцента. */
-function pickFramesWithMoments(analysis: AudioAnalysis, difficulty: Difficulty, moments: Moment[]): number[] {
-  const picked = pickNoteFrames(analysis, difficulty.minGapSec)
+function pickFramesWithMoments(
+  analysis: AudioAnalysis,
+  difficulty: Difficulty,
+  moments: Moment[],
+  intensity: Float32Array,
+): number[] {
+  const picked = pickByIntensity(analysis, difficulty, intensity)
   const rushCandidates = pickNoteFrames(analysis, difficulty.minGapSec * BUILDUP_RUSH_GAP)
 
   const frames: number[] = []
@@ -146,17 +231,34 @@ function markLastNotesBeforePauses(notes: LaneNote[], moments: Moment[]): void {
   }
 }
 
-/** На каждом взрыве две ноты сразу: самое заметное событие уровня. */
+/**
+ * Отмечает смены частей песни. После паузы и через одну смену приходит длинная
+ * нота SPACE, в остальных случаях парная нота на крайних дорожках.
+ */
 function addAccents(notes: LaneNote[], moments: Moment[]): LaneNote[] {
   const result = [...notes]
+  let impactCount = 0
   for (const moment of moments) {
     if (moment.kind !== 'impact') continue
-    result.push({ id: 0, time: moment.start, lane: 0, kind: 'accent', direction: 0 })
-    result.push({ id: 0, time: moment.start, lane: 2, kind: 'accent', direction: 0 })
+    const useSpace = impactCount % 2 === 0 || isAfterPause(moment, moments)
+    impactCount += 1
+    if (useSpace) {
+      result.push({ id: 0, time: moment.start, lane: 1, kind: 'space', direction: 0 })
+    } else {
+      result.push({ id: 0, time: moment.start, lane: 0, kind: 'accent', direction: 0 })
+      result.push({ id: 0, time: moment.start, lane: 2, kind: 'accent', direction: 0 })
+    }
   }
   result.sort((a, b) => a.time - b.time)
   for (let i = 0; i < result.length; i++) result[i] = { ...result[i], id: i }
   return result
+}
+
+function isAfterPause(impact: Moment, moments: Moment[]): boolean {
+  for (const moment of moments) {
+    if (moment.kind === 'pause' && Math.abs(moment.end - impact.start) < 0.5) return true
+  }
+  return false
 }
 
 /**

@@ -10,6 +10,10 @@ export const MISS_WARNING_STREAK = 3
 const GOOD_POINTS = 100
 const PERFECT_POINTS = 250
 const STAR_BONUS = 2
+/** Сколько звёзд нужно собрать для суперрежима. */
+export const STARS_FOR_OVERDRIVE = 3
+const OVERDRIVE_SEC = 8
+const OVERDRIVE_BONUS = 2
 /** Пока луч зажат, очки капают маленькими порциями. */
 const HOLD_TICK_SEC = 0.1
 const HOLD_TICK_POINTS = 15
@@ -23,6 +27,15 @@ const ENERGY_LOSS_MISS = 0.07
 const ENERGY_GAIN_HIT = 0.012
 /** На этих значениях комбо игра хвалит игрока. */
 const COMBO_MILESTONES = [10, 25, 50, 75, 100, 150, 200, 300, 500]
+
+/** Уровни серии: чем дольше без промаха, тем сильнее меняется экран. */
+export const STREAK_TIERS = [
+  { from: 0, name: '' },
+  { from: 10, name: 'Разогрев' },
+  { from: 25, name: 'В ударе' },
+  { from: 50, name: 'В потоке' },
+  { from: 100, name: 'Легенда' },
+]
 
 export type LaneEventType = 'perfect' | 'good' | 'miss' | 'holdDone' | 'holdBroken'
 
@@ -39,6 +52,8 @@ export interface LaneEvent {
   /** true на промахе, с которого начинается предупреждение. */
   warning: boolean
   noteTime: number
+  /** На этой ноте включился суперрежим. */
+  startedOverdrive?: boolean
 }
 
 /** Луч, который игрок сейчас держит. */
@@ -65,6 +80,9 @@ export interface LaneGame {
   missStreak: number
   energy: number
   failed: boolean
+  /** Собранные звёзды: когда их достаточно, включается суперрежим. */
+  starCharge: number
+  overdriveUntil: number
 }
 
 export function createLaneGame(notes: LaneNote[], difficulty: Difficulty): LaneGame {
@@ -83,6 +101,8 @@ export function createLaneGame(notes: LaneNote[], difficulty: Difficulty): LaneG
     missStreak: 0,
     energy: 1,
     failed: false,
+    starCharge: 0,
+    overdriveUntil: -Infinity,
   }
 }
 
@@ -178,7 +198,12 @@ export function releaseLane(game: LaneGame, time: number, lane: number): LaneEve
 
 /** Нажатие на дорожку: ищем ближайшую обычную ноту в окне. Лишнее нажатие не штрафуется. */
 export function pressLane(game: LaneGame, time: number, lane: number): LaneEvent | null {
-  return judgeNearest(game, time, (note) => note.kind !== 'swipe' && note.lane === lane)
+  return judgeNearest(game, time, (note) => note.kind !== 'swipe' && note.kind !== 'space' && note.lane === lane)
+}
+
+/** Пробел: длинная нота на все дорожки. */
+export function pressSpace(game: LaneGame, time: number): LaneEvent | null {
+  return judgeNearest(game, time, (note) => note.kind === 'space')
 }
 
 /** Свайп стрелкой: подходит любая дорожка, важно только направление. */
@@ -205,8 +230,20 @@ function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => bo
   game.judged.add(nearest.id)
   if (nearest.kind === 'hold') game.holds[nearest.lane] = { note: nearest, scoredUntil: nearest.time }
   const isPerfect = nearestError <= PERFECT_WINDOW_SEC
-  const starBonus = nearest.kind === 'star' || nearest.kind === 'accent' ? STAR_BONUS : 1
-  const points = (isPerfect ? PERFECT_POINTS : GOOD_POINTS) * multiplier(game) * starBonus
+  const isSpecial = nearest.kind === 'star' || nearest.kind === 'accent' || nearest.kind === 'space'
+  const overdriveBonus = isOverdrive(game, nearest.time) ? OVERDRIVE_BONUS : 1
+  const points =
+    (isPerfect ? PERFECT_POINTS : GOOD_POINTS) * multiplier(game) * (isSpecial ? STAR_BONUS : 1) * overdriveBonus
+
+  let startedOverdrive = false
+  if (nearest.kind === 'star') {
+    game.starCharge += 1
+    if (game.starCharge >= STARS_FOR_OVERDRIVE) {
+      game.starCharge = 0
+      game.overdriveUntil = nearest.time + OVERDRIVE_SEC
+      startedOverdrive = true
+    }
+  }
   game.score += points
   game.combo += 1
   game.maxCombo = Math.max(game.maxCombo, game.combo)
@@ -223,7 +260,29 @@ function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => bo
     milestone: COMBO_MILESTONES.includes(game.combo) ? game.combo : 0,
     warning: false,
     noteTime: nearest.time,
+    startedOverdrive,
   }
+}
+
+export function isOverdrive(game: LaneGame, time: number): boolean {
+  return time < game.overdriveUntil
+}
+
+/** Номер уровня серии: индекс в STREAK_TIERS. */
+export function streakTier(combo: number): number {
+  let tier = 0
+  for (let i = 0; i < STREAK_TIERS.length; i++) {
+    if (combo >= STREAK_TIERS[i].from) tier = i
+  }
+  return tier
+}
+
+/** Заполнение шкалы до следующего уровня серии, 0..1. */
+export function streakProgress(combo: number): number {
+  const tier = streakTier(combo)
+  if (tier === STREAK_TIERS.length - 1) return 1
+  const from = STREAK_TIERS[tier].from
+  return (combo - from) / (STREAK_TIERS[tier + 1].from - from)
 }
 
 /** Автопилот для демонстрации: разбирает ноты точно в их момент, независимо от кадров. */
@@ -234,7 +293,11 @@ export function playAutopilot(game: LaneGame, time: number): LaneEvent[] {
     if (note.time > time) break
     if (game.judged.has(note.id)) continue
     const event =
-      note.kind === 'swipe' ? pressSwipe(game, note.time, note.direction) : pressLane(game, note.time, note.lane)
+      note.kind === 'swipe'
+        ? pressSwipe(game, note.time, note.direction)
+        : note.kind === 'space'
+          ? pressSpace(game, note.time)
+          : pressLane(game, note.time, note.lane)
     if (event) events.push(event)
   }
   return events

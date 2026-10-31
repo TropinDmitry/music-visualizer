@@ -161,7 +161,7 @@ export function pickNoteFrames(analysis: AudioAnalysis, minGapSec: number): numb
  * Важность удара для игры. Бас весит больше: широкополосный хэт детектор считает
  * сильнее бочки, но слышим и отстукиваем мы именно бочку.
  */
-function beatWeight(analysis: AudioAnalysis, frame: number): number {
+export function beatWeight(analysis: AudioAnalysis, frame: number): number {
   return analysis.onsetStrength[frame] + 2 * peakBassAfter(analysis, frame)
 }
 

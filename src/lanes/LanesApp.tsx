@@ -12,16 +12,22 @@ import { findMoments, type Moment } from './structure.ts'
 import {
   accuracy,
   createLaneGame,
+  isOverdrive,
   MISS_WARNING_STREAK,
   multiplier,
   multiplierProgress,
   playAutopilot,
   pressLane,
+  pressSpace,
   pressSwipe,
   rank,
   releaseLane,
+  STARS_FOR_OVERDRIVE,
+  STREAK_TIERS,
   starRating,
   stepLanes,
+  streakProgress,
+  streakTier,
   type LaneEvent,
   type LaneGame,
 } from './rules.ts'
@@ -51,6 +57,10 @@ interface Hud {
   time: number
   accuracyPercent: number
   isInDanger: boolean
+  streakTier: number
+  streakFill: number
+  starCharge: number
+  isOverdrive: boolean
 }
 
 /** Большая надпись по центру: похвала или предупреждение. */
@@ -99,6 +109,10 @@ const EMPTY_HUD: Hud = {
   time: 0,
   accuracyPercent: 100,
   isInDanger: false,
+  streakTier: 0,
+  streakFill: 0,
+  starCharge: 0,
+  isOverdrive: false,
 }
 const LANE_KEYS: Record<string, number> = { KeyA: 0, KeyS: 1, KeyD: 2, Digit1: 0, Digit2: 1, Digit3: 2 }
 const NO_JUDGED = new Set<number>()
@@ -108,6 +122,8 @@ const VIDEO_MAX_DRIFT_SEC = 0.15
 const LOW_ENERGY = 0.3
 /** Сдвиг пальца, после которого касание считается смахиванием. */
 const SWIPE_MIN_PX = 35
+/** Какая доля экрана сверху на телефоне работает как пробел. */
+const SPACE_TOUCH_ZONE = 0.5
 /** На сколько радиан поворачивается оттенок клипа от начала песни до конца. */
 const COLOR_DRIFT_RADIANS = 2
 const MAX_POPUPS = 6
@@ -116,14 +132,14 @@ const POPUP_LANE_STEP_VH = 31
 
 const PRAISE: Record<number, string> = {
   10: 'РАЗОГРЕВ',
-  25: 'ОТЛИЧНО!',
-  50: 'НЕУДЕРЖИМО!',
-  75: 'В ПОТОКЕ!',
-  100: 'ЛЕГЕНДА!',
+  25: 'В УДАРЕ',
+  50: 'В ПОТОКЕ',
+  75: 'НЕ ОСТАНАВЛИВАЙТЕСЬ',
+  100: 'ЛЕГЕНДА',
   150: 'БЕЗ ЕДИНОЙ ОШИБКИ?',
-  200: 'ВЫ МАШИНА!',
-  300: 'ЗА ГРАНЬЮ!',
-  500: 'АБСОЛЮТ!',
+  200: 'ВЫ МАШИНА',
+  300: 'ЗА ГРАНЬЮ',
+  500: 'АБСОЛЮТ',
 }
 
 function loadBestScore(key: string): number {
@@ -273,6 +289,10 @@ export function LanesApp() {
         sounds?.miss()
       } else {
         scene.hitEffect(event.lane, event.type === 'perfect' || event.type === 'holdDone', clockTime)
+        if (event.kind === 'space') {
+          scene.impactEffect(clockTime)
+          sounds?.star()
+        }
         if (event.type === 'holdDone') sounds?.holdDone()
         if (event.kind === 'swipe') {
           scene.launchArrow(event.lane, event.direction, clockTime)
@@ -286,6 +306,10 @@ export function LanesApp() {
 
       if (event.milestone) {
         showBanner(PRAISE[event.milestone], `${event.milestone} подряд`, false)
+        sounds?.milestone()
+      }
+      if (event.startedOverdrive) {
+        showBanner('СУПЕРРЕЖИМ', 'очки ×2 на 8 секунд', false)
         sounds?.milestone()
       }
       if (event.warning) {
@@ -356,6 +380,9 @@ export function LanesApp() {
         const songProgress = Math.min(1, time / currentAnalysis.duration)
         scene.setHueShift(current.colorDrift ? songProgress * COLOR_DRIFT_RADIANS : 0)
         applyMoments(time, clockTime)
+        // Сила серии растёт с уровнем, а не с каждой нотой: так шаги заметны
+        const tierCount = STREAK_TIERS.length - 1
+        scene.setStreak((streakTier(game.combo) + streakProgress(game.combo) * 0.5) / tierCount, isOverdrive(game, time))
 
         const now = performance.now()
         if (now - lastHudAt > 80) {
@@ -370,6 +397,10 @@ export function LanesApp() {
             time,
             accuracyPercent: hasJudgedNotes ? Math.round(accuracy(game) * 100) : 100,
             isInDanger: game.energy < LOW_ENERGY || game.missStreak >= MISS_WARNING_STREAK,
+            streakTier: streakTier(game.combo),
+            streakFill: streakProgress(game.combo),
+            starCharge: game.starCharge,
+            isOverdrive: isOverdrive(game, time),
           })
         }
         if (game.failed || !player.isPlaying) finishRef.current()
@@ -381,7 +412,10 @@ export function LanesApp() {
         scene.setHueShift(0)
       }
 
-      if (!isPlaying) scene.setMood(0, 0)
+      if (!isPlaying) {
+        scene.setMood(0, 0)
+        scene.setStreak(0, false)
+      }
       scene.setClipOptions(current.look, current.clipBrightness, current.laneContrast, current.clipFocus)
       const inMenu = currentScreen === 'menu'
       scene.render(
@@ -445,6 +479,11 @@ export function LanesApp() {
       const game = gameRef.current
       if (time !== null && game) eventHandlerRef.current(pressSwipe(game, time, direction))
     },
+    space() {
+      const time = playingTime()
+      const game = gameRef.current
+      if (time !== null && game) eventHandlerRef.current(pressSpace(game, time))
+    },
     release(lane: number) {
       const time = playingTime()
       const game = gameRef.current
@@ -464,6 +503,10 @@ export function LanesApp() {
       }
       if (event.code === 'ArrowLeft') handlersRef.current.swipe(-1)
       if (event.code === 'ArrowRight') handlersRef.current.swipe(1)
+      if (event.code === 'Space') {
+        event.preventDefault() // иначе пробел нажмёт кнопку, на которой фокус
+        handlersRef.current.space()
+      }
     }
     const onKeyUp = (event: KeyboardEvent) => {
       const lane = LANE_KEYS[event.code]
@@ -491,6 +534,11 @@ export function LanesApp() {
     const scene = sceneRef.current
     if (!canvas || !scene || screen !== 'playing') return
     const box = canvas.getBoundingClientRect()
+    // На телефоне нет пробела: длинную ноту нажимают касанием верхней части экрана
+    if (event.pointerType === 'touch' && event.clientY - box.top < box.height * SPACE_TOUCH_ZONE) {
+      handlersRef.current.space()
+      return
+    }
     const x = (event.clientX - (box.left + box.width / 2)) / (box.height / 2)
     const lane = scene.laneAt(x)
     touchesRef.current.set(event.pointerId, { lane, startX: event.clientX, hasSwiped: false })
@@ -596,7 +644,11 @@ export function LanesApp() {
       <video ref={videoRef} src={clipUrl || undefined} muted playsInline preload="auto" hidden />
 
       {(screen === 'playing' || screen === 'paused') && (
-        <div className={`hud tier-${hud.multiplier} ${hud.isInDanger ? 'is-danger' : ''}`}>
+        <div
+          className={`hud tier-${hud.multiplier} streak-${hud.streakTier} ${hud.isInDanger ? 'is-danger' : ''} ${
+            hud.isOverdrive ? 'is-overdrive' : ''
+          }`}
+        >
           <div className="score-bar">
             <strong className="score-value">{hud.score.toLocaleString('ru-RU')}</strong>
             <div className="track-progress">
@@ -605,6 +657,14 @@ export function LanesApp() {
             <span className="score-time">
               {formatTime(hud.time)} / {formatTime(duration)}
             </span>
+            {hud.streakTier > 0 && (
+              <div className="streak-meter" key={hud.streakTier}>
+                <strong>{STREAK_TIERS[hud.streakTier].name}</strong>
+                <div className="streak-bar">
+                  <div style={{ width: `${hud.streakFill * 100}%` }} />
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="side-pill side-left">
@@ -617,6 +677,13 @@ export function LanesApp() {
             </span>
             <div className="multiplier-bar">
               <div style={{ width: `${hud.multiplierFill * 100}%` }} />
+            </div>
+            <div className="star-pips" aria-label={`Звёзд до суперрежима: ${hud.starCharge} из ${STARS_FOR_OVERDRIVE}`}>
+              {Array.from({ length: STARS_FOR_OVERDRIVE }, (_, index) => (
+                <span key={index} className={index < hud.starCharge ? 'is-earned' : ''}>
+                  ★
+                </span>
+              ))}
             </div>
           </div>
 
@@ -646,7 +713,7 @@ export function LanesApp() {
             </span>
           ))}
 
-          <div className="hud-hint">A S D или нажатие на дорожку · ← → или смахивание — стрелки · Esc — пауза</div>
+          <div className="hud-hint">A S D — круги · ← → — стрелки · пробел — SPACE · Esc — пауза</div>
         </div>
       )}
 
@@ -839,9 +906,10 @@ export function LanesApp() {
           <ul className="legend">
             <li>Пурпурный круг: клавиша A, S, D или нажатие на дорожку</li>
             <li>Белый круг со стрелкой: ← или → либо смахивание в ту же сторону</li>
-            <li>Золотая звезда: как круг, очки ×2</li>
+            <li>Золотая звезда: три звезды включают суперрежим, очки ×2 на 8 секунд</li>
             <li>Пурпурный круг с лучом: зажмите и держите до конца</li>
-            <li>Золотая пара: две клавиши сразу на взрыве песни</li>
+            <li>Парная нота: две клавиши сразу</li>
+            <li>Белая плашка SPACE: пробел, на телефоне касание верха экрана</li>
           </ul>
         </main>
       )}

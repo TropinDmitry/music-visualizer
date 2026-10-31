@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { analyzeAudio, mixToMono } from '../audio/analyzer.ts'
 import { synthesizeDemoTrack } from '../audio/demoTrack.ts'
-import { findMoments } from './structure.ts'
+import { findMoments, songIntensity } from './structure.ts'
 import { DIFFICULTIES, findDifficulty, generateLaneLevel, type LaneNote } from './level.ts'
 import {
   accuracy,
@@ -10,12 +10,16 @@ import {
   MISS_WARNING_STREAK,
   multiplierProgress,
   playAutopilot,
+  isOverdrive,
   pressLane,
+  pressSpace,
   pressSwipe,
   rank,
   releaseLane,
   starRating,
   stepLanes,
+  streakProgress,
+  streakTier,
 } from './rules.ts'
 
 const demo = synthesizeDemoTrack(40)
@@ -37,7 +41,8 @@ describe('generateLaneLevel', () => {
 
   it('используются все три дорожки и нет трёх нот подряд на одной', () => {
     for (const difficulty of DIFFICULTIES) {
-      const notes = generateLaneLevel(analysis, difficulty)
+      const allNotes = generateLaneLevel(analysis, difficulty)
+      const notes = allNotes.filter((note) => note.kind !== 'accent' && note.kind !== 'space')
       expect(new Set(notes.map((note) => note.lane)).size).toBe(3)
       for (let i = 2; i < notes.length; i++) {
         // Длинная пауза после луча разрывает серию, поэтому здесь её не считаем
@@ -123,16 +128,36 @@ describe('драматургия песни', () => {
     expect(buildup?.start).toBeLessThan(17)
   })
 
-  it('в паузе нот нет, а на взрыве две ноты сразу', () => {
+  it('в паузе нот нет, а после неё приходит нота SPACE', () => {
     const notes = generateLaneLevel(dramatic, hard)
     const pause = moments.find((moment) => moment.kind === 'pause')
     for (const note of notes) {
       expect(note.time > (pause?.start ?? 0) && note.time < (pause?.end ?? 0)).toBe(false)
     }
-    const accents = notes.filter((note) => note.kind === 'accent')
-    expect(accents.length).toBeGreaterThanOrEqual(2)
-    expect(accents[0].time).toBe(accents[1].time)
-    expect(accents[0].lane).not.toBe(accents[1].lane)
+    const spaces = notes.filter((note) => note.kind === 'space')
+    expect(spaces.some((note) => Math.abs(note.time - 21) < 0.3)).toBe(true)
+  })
+
+  it('в сильной части нот больше, чем в быстрой тихой читке', () => {
+    // Куплет: частые тихие щелчки без баса. Припев: редкие мощные удары.
+    const samples = new Float32Array(SAMPLE_RATE * 40)
+    for (let time = 2; time < 20; time += 0.15) {
+      const start = Math.round(time * SAMPLE_RATE)
+      for (let i = 0; i < 0.06 * SAMPLE_RATE; i++) {
+        const t = i / SAMPLE_RATE
+        samples[start + i] += 0.25 * Math.sin(2 * Math.PI * 1800 * t) * Math.exp(-t * 80)
+      }
+    }
+    addKicks(samples, 20, 38, 0.7, () => 0.95)
+
+    const track = analyzeAudio(samples, SAMPLE_RATE)
+    const intensity = songIntensity(track)
+    expect(intensity[Math.round(30 * track.fps)]).toBeGreaterThan(intensity[Math.round(10 * track.fps)])
+
+    const notes = generateLaneLevel(track, hard)
+    const verse = notes.filter((note) => note.time >= 4 && note.time < 18).length
+    const chorus = notes.filter((note) => note.time >= 22 && note.time < 36).length
+    expect(chorus).toBeGreaterThan(verse)
   })
 
   it('автопилот проходит уровень с акцентами без промахов', () => {
@@ -242,6 +267,39 @@ describe('правила', () => {
     for (let i = 0; i < 8; i++) pressLane(game, i + 1, 0)
     stepLanes(game, 100)
     expect(starRating(game)).toBe(1)
+  })
+
+  it('нота SPACE нажимается только пробелом', () => {
+    const notes: LaneNote[] = [{ id: 0, time: 1, lane: 1, kind: 'space', direction: 0 }]
+    const game = createLaneGame(notes, easy)
+    expect(pressLane(game, 1, 1)).toBeNull()
+    expect(pressSpace(game, 1)?.points).toBe(500)
+  })
+
+  it('три звезды включают суперрежим с удвоенными очками', () => {
+    const notes: LaneNote[] = [
+      { id: 0, time: 1, lane: 0, kind: 'star', direction: 0 },
+      { id: 1, time: 2, lane: 0, kind: 'star', direction: 0 },
+      { id: 2, time: 3, lane: 0, kind: 'star', direction: 0 },
+      { id: 3, time: 4, lane: 0, kind: 'tap', direction: 0 },
+      { id: 4, time: 20, lane: 0, kind: 'tap', direction: 0 },
+    ]
+    const game = createLaneGame(notes, easy)
+    pressLane(game, 1, 0)
+    expect(pressLane(game, 2, 0)?.startedOverdrive).toBe(false)
+    expect(pressLane(game, 3, 0)?.startedOverdrive).toBe(true)
+    expect(isOverdrive(game, 4)).toBe(true)
+    expect(pressLane(game, 4, 0)?.points).toBe(500)
+    expect(isOverdrive(game, 20)).toBe(false)
+    expect(pressLane(game, 20, 0)?.points).toBe(250)
+  })
+
+  it('уровни серии растут с комбо', () => {
+    expect(streakTier(5)).toBe(0)
+    expect(streakTier(30)).toBe(2)
+    expect(streakTier(500)).toBe(4)
+    expect(streakProgress(17)).toBeCloseTo(7 / 15)
+    expect(streakProgress(500)).toBe(1)
   })
 
   it('событие стрелки сообщает направление для отлёта', () => {

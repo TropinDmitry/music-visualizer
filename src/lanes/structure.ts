@@ -41,6 +41,8 @@ const BUILDUP_MIN_RISE = 1.06
 const EDGE_SEC = 2
 /** Полуширина окна, в котором ищется пик громкости. */
 const PEAK_REACH_SEC = 0.2
+/** Окно усреднения силы части песни: припев длиннее нескольких тактов. */
+const INTENSITY_WINDOW_SEC = 5
 /** Смена тембра: шаг сетки, окно сравнения и самая малая заметная разница. */
 const TIMBRE_STEP_SEC = 0.1
 const TIMBRE_WINDOW_SEC = 1.5
@@ -53,6 +55,38 @@ const BASS_DROP_RATIO = 0.55
 /** Пауза должна быть во столько раз длиннее обычного промежутка между ударами. */
 const PAUSE_BEATS = 1.7
 const BEAT_LOOK_BACK_SEC = 4
+
+/**
+ * Сила части песни по кадрам, 0..1. Считается по громкости и басу за несколько
+ * секунд, а не по числу ударов: быстрая читка даёт много ударов при слабом низе,
+ * а припев сливается в плотную стену звука с немногими отдельными ударами.
+ * Нормировка по самому треку: 0 — его спокойные места, 1 — самые мощные.
+ */
+export function songIntensity(analysis: AudioAnalysis): Float32Array {
+  const rmsReference = Math.max(percentile(analysis.raw.rms, 0.95), 0.01)
+  const bassReference = Math.max(percentile(analysis.raw.bass, 0.95), 0.01)
+  const count = analysis.frameCount
+  const prefix = new Float64Array(count + 1)
+  for (let i = 0; i < count; i++) {
+    const power = analysis.raw.rms[i] / rmsReference + analysis.raw.bass[i] / bassReference
+    prefix[i + 1] = prefix[i] + power / 2
+  }
+
+  const reach = Math.round((INTENSITY_WINDOW_SEC / 2) * analysis.fps)
+  const smooth = new Float32Array(count)
+  for (let i = 0; i < count; i++) {
+    const from = Math.max(0, i - reach)
+    const to = Math.min(count, i + reach)
+    smooth[i] = (prefix[to] - prefix[from]) / (to - from)
+  }
+
+  const low = percentile(smooth, 0.1)
+  const high = percentile(smooth, 0.9)
+  const range = Math.max(high - low, 0.001)
+  const curve = new Float32Array(count)
+  for (let i = 0; i < count; i++) curve[i] = Math.min(1, Math.max(0, (smooth[i] - low) / range))
+  return curve
+}
 
 export function findMoments(analysis: AudioAnalysis): Moment[] {
   const levels = loudnessLevels(analysis)
