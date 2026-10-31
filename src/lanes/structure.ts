@@ -61,6 +61,11 @@ const PULSE_MIN_PROMINENCE = 1.3
 const PULSE_SAME_SOUND = 0.7
 /** Такая смена спектра значит, что музыка стала другой: протяжный звук здесь кончился. */
 const BIG_CHANGE = 0.03
+/** В активных частях шаг ритма ищем по отрезкам: темп и рисунок внутри песни меняются. */
+const ACTIVE_WINDOW_SEC = 10
+const ACTIVE_LEVEL = 0.55
+/** Шаг короче этого удваиваем: рисунок на него не ляжет, рука не успеет. */
+const ACTIVE_MIN_STEP_SEC = 0.6
 /** И она должна быть внезапной: плавный взлёт тона меняет спектр постоянно. */
 const BIG_CHANGE_SHARPNESS = 3
 /** Какой шаг считается пульсом и сколько ударов подряд нужно, чтобы поверить в него. */
@@ -270,6 +275,44 @@ export function findSoftPulses(analysis: AudioAnalysis, sustains: Moment[]): num
     first = last + 1
   }
   return pulses
+}
+
+/**
+ * Шаг ритма в активных частях: для каждого отрезка своя ровная цепочка ударов.
+ * Участки с лучами и мягким пульсом пропускаем, у них свой рисунок.
+ */
+export function findActivePulses(
+  analysis: AudioAnalysis,
+  intensity: Float32Array,
+  sustains: Moment[],
+  softPulses: number[],
+): number[][] {
+  const chains: number[][] = []
+  for (let start = 0; start + ACTIVE_WINDOW_SEC <= analysis.duration; start += ACTIVE_WINDOW_SEC) {
+    const end = start + ACTIVE_WINDOW_SEC
+    if (meanIntensity(intensity, analysis.fps, start, end) < ACTIVE_LEVEL) continue
+    const isBusy = sustains.some((sustain) => sustain.start < end && sustain.end > start)
+    if (isBusy || softPulses.some((time) => time >= start && time < end)) continue
+
+    const peaks = analysis.onsetTimes.filter((time) => time >= start && time < end)
+    const chain = longestChain(peaks)
+    if (chain.length > 0) chains.push(longEnoughStep(chain))
+  }
+  return chains
+}
+
+function meanIntensity(intensity: Float32Array, fps: number, fromSec: number, toSec: number): number {
+  const from = Math.round(fromSec * fps)
+  const to = Math.min(intensity.length, Math.round(toSec * fps))
+  let sum = 0
+  for (let frame = from; frame < to; frame++) sum += intensity[frame]
+  return sum / Math.max(1, to - from)
+}
+
+function longEnoughStep(chain: number[]): number[] {
+  const step = (chain[chain.length - 1] - chain[0]) / (chain.length - 1)
+  if (step >= ACTIVE_MIN_STEP_SEC) return chain
+  return chain.filter((_, index) => index % 2 === 0)
 }
 
 /** Смены звука по всему треку: удары детектор видит, а смену ноты в риффе почти нет. */

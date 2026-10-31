@@ -1,6 +1,7 @@
 import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { beatWeight, pickNoteFrames } from '../game/level.ts'
 import {
+  findActivePulses,
   findMoments,
   findNoteChanges,
   findSections,
@@ -89,7 +90,16 @@ const HOLD_MIN_SEC = 0.9
 const BUILDUP_RUSH_SEC = 2.5
 const BUILDUP_RUSH_GAP = 0.6
 /** Узор «лесенка» на разгоне: рука бежит по дорожкам туда и обратно. */
-const STAIRS = [0, 1, 2, 1]
+const STAIRS = [
+  [0, 1, 2, 1],
+  [2, 1, 0, 1],
+  [0, 2, 1, 2],
+  [2, 0, 1, 0],
+]
+const STAIRS_CHANGE_SEC = 10
+/** Шаг активной части делится на столько долей: на них встают и удары, и рисунок. */
+const ACTIVE_SLOTS = 4
+const ACTIVE_SHORT_STEP_SEC = 0.75
 /** Вокруг акцента оставляем воздух, чтобы он прозвучал отдельно. */
 const ACCENT_CLEAR_SEC = 0.2
 /** Выше этой силы песни часть нот становится парными. */
@@ -173,16 +183,21 @@ export function generateLaneLevel(
   const rawSustains = splitAtBigChanges(analysis, findSustains(analysis))
   const pulses = findSoftPulses(analysis, rawSustains)
   const sustains = withoutPulses(rawSustains, pulses)
+  const activeChains = focus === 'voice' ? [] : findActivePulses(analysis, intensity, sustains, pulses)
   const frames = pickFramesWithMoments(analysis, difficulty, moments, focus, pulses, intensity, trace)
-  const lanes = chooseLanes(analysis, frames)
+  const patterned = addActivePattern(frames, activeChains, analysis.fps, difficulty.pulsePattern)
+  const regular = (time: number) => isInPulse(time, pulses) || activeChains.some((chain) => isInChain(time, chain))
+  const lanes = chooseLanes(analysis, patterned)
 
   const notes: LaneNote[] = []
   let stairStep = 0
-  for (let i = 0; i < frames.length; i++) {
-    const time = frames[i] / analysis.fps
+  for (let i = 0; i < patterned.length; i++) {
+    const time = patterned[i] / analysis.fps
     let lane = lanes[i]
-    if (isInRush(time, moments) || isInPulse(time, pulses)) {
-      lane = STAIRS[stairStep % STAIRS.length]
+    if (isInRush(time, moments) || regular(time)) {
+      // Лесенка время от времени меняется, иначе длинный припев становится однообразным
+      const stairs = STAIRS[Math.floor(time / STAIRS_CHANGE_SEC) % STAIRS.length]
+      lane = stairs[stairStep % stairs.length]
       stairStep += 1
     }
     const kind: NoteKind = (i + 1) % STAR_EVERY === 0 ? 'star' : 'tap'
@@ -487,6 +502,45 @@ function addPulsePattern(frames: number[], pulses: number[], fps: number, patter
     for (const share of pattern) frames.push(Math.round((pulses[i] + step * share) * fps))
   }
   frames.sort((a, b) => a - b)
+}
+
+/**
+ * В активной части рисунок складывается из самой музыки: удар встаёт на ближайшую
+ * долю шага, а пустые доли заполняются рисунком сложности. Так ноты ровные, но
+ * не одинаковые: где музыка дробит шаг, там и нот больше.
+ */
+function addActivePattern(frames: number[], chains: number[][], fps: number, pattern: number[]): number[] {
+  let result = [...frames]
+  for (const chain of chains) {
+    for (let i = 0; i + 1 < chain.length; i++) {
+      const start = chain[i]
+      const step = chain[i + 1] - start
+      // На коротком шаге четыре доли дали бы пять нажатий в секунду всю песню подряд
+      const slotCount = step < ACTIVE_SHORT_STEP_SEC ? 2 : ACTIVE_SLOTS
+      const slotSec = step / slotCount
+      const slots = new Set<number>()
+      for (const share of pattern) {
+        const slot = Math.round(share * slotCount)
+        if (slot < slotCount) slots.add(slot)
+      }
+      for (const frame of result) {
+        const slot = Math.round((frame / fps - start) / slotSec)
+        if (slot >= 0 && slot < slotCount) slots.add(slot)
+      }
+      // Слоты уже посчитаны, поэтому старые ноты шага заменяем новыми
+      result = result.filter((frame) => {
+        const slot = Math.round((frame / fps - start) / slotSec)
+        return slot < 0 || slot >= slotCount
+      })
+      for (const slot of slots) result.push(Math.round((start + slot * slotSec) * fps))
+    }
+  }
+  result.sort((a, b) => a - b)
+  return result
+}
+
+function isInChain(time: number, chain: number[]): boolean {
+  return time >= chain[0] && time <= chain[chain.length - 1]
 }
 
 /** Время внутри одного из отрезков с пульсом. Между отрезками шаг заведомо длиннее. */

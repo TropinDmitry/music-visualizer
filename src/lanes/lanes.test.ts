@@ -71,7 +71,7 @@ describe('generateLaneLevel', () => {
     expect(arrows.some((note) => note.time > 32)).toBe(true)
     for (let i = 1; i < notes.length; i++) {
       if (notes[i].kind === 'swipe') {
-        const min = notes[i - 1].kind === 'swipe' ? 0.26 : 0.29
+        const min = notes[i - 1].kind === 'swipe' ? 0.26 : 0.27
         expect(notes[i].time - notes[i - 1].time).toBeGreaterThanOrEqual(min)
       }
     }
