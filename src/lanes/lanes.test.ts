@@ -70,7 +70,7 @@ describe('generateLaneLevel', () => {
     expect(arrows.some((note) => note.time > 32)).toBe(true)
     for (let i = 1; i < notes.length; i++) {
       if (notes[i].kind === 'swipe') {
-        const min = notes[i - 1].kind === 'swipe' ? 0.3 : 0.4
+        const min = notes[i - 1].kind === 'swipe' ? 0.26 : 0.29
         expect(notes[i].time - notes[i - 1].time).toBeGreaterThanOrEqual(min)
       }
     }
@@ -224,7 +224,7 @@ describe('драматургия песни', () => {
     expect(spaces.some((note) => Math.abs(note.time - 21) < 0.3)).toBe(true)
   })
 
-  it('в сильной части нот больше, чем в быстрой тихой читке', () => {
+  it('частоту нот задаёт рисунок ударов, а не сила части', () => {
     // Куплет: частые тихие щелчки без баса. Припев: редкие мощные удары.
     const samples = new Float32Array(SAMPLE_RATE * 40)
     for (let time = 2; time < 20; time += 0.15) {
@@ -248,7 +248,7 @@ describe('драматургия песни', () => {
     const notes = generateLaneLevel(track, hard)
     const verse = notes.filter((note) => note.time >= 4 && note.time < 18).length
     const chorus = notes.filter((note) => note.time >= 22 && note.time < 36).length
-    expect(chorus).toBeGreaterThan(verse)
+    expect(verse).toBeGreaterThan(chorus)
   })
 
   it('тяжёлый бас без заполненного спектра не считается мощной частью', () => {
@@ -269,31 +269,35 @@ describe('драматургия песни', () => {
     expect(intensity[Math.round(25 * track.fps)]).toBeGreaterThan(intensity[Math.round(5 * track.fps)])
   })
 
-  it('разговор без ритма даёт меньше нот, чем ровный бит', () => {
-    const samples = new Float32Array(SAMPLE_RATE * 40)
-    let seed = 11
-    const random = () => {
-      seed = (seed * 1664525 + 1013904223) >>> 0
-      return seed / 2 ** 32
-    }
-    // Вступление: слоги через случайные промежутки, как речь
-    for (let time = 2; time < 18; time += 0.12 + random() * 0.5) {
-      const start = Math.round(time * SAMPLE_RATE)
-      for (let i = 0; i < 0.1 * SAMPLE_RATE; i++) {
-        const t = i / SAMPLE_RATE
-        samples[start + i] += 0.3 * Math.sin(2 * Math.PI * 700 * t) * Math.sin((Math.PI * i) / (0.1 * SAMPLE_RATE))
-      }
-    }
-    // Дальше ровный плотный бит
-    addKicks(samples, 18, 38, 0.5, () => 0.9)
-    for (let i = 18 * SAMPLE_RATE; i < 38 * SAMPLE_RATE; i++) {
-      const t = i / SAMPLE_RATE
-      samples[i] += 0.1 * (Math.sin(2 * Math.PI * 1100 * t) + Math.sin(2 * Math.PI * 7000 * t))
-    }
+  it('ноты стоят на ударах и повторяют их рисунок: мелкие интервалы и широкие', () => {
+    const samples = new Float32Array(SAMPLE_RATE * 24)
+    const hits: number[] = []
+    for (let time = 2; time < 8; time += 0.2) hits.push(time)
+    for (let time = 9; time < 22; time += 0.8) hits.push(time)
+    for (const time of hits) addKicks(samples, time, time + 0.01, 1, () => 0.9)
+
     const notes = generateLaneLevel(analyzeAudio(samples, SAMPLE_RATE), hard)
-    const speech = notes.filter((note) => note.time >= 3 && note.time < 17).length
-    const music = notes.filter((note) => note.time >= 20 && note.time < 34).length
-    expect(music).toBeGreaterThan(speech)
+    const starts = [...new Set(notes.map((note) => note.time))]
+    for (const time of starts) {
+      expect(Math.min(...hits.map((hit) => Math.abs(hit - time)))).toBeLessThan(0.05)
+    }
+    const fast = starts.filter((time) => time >= 2.5 && time < 7.5).length
+    const slow = starts.filter((time) => time >= 10 && time < 15).length
+    expect(fast).toBeGreaterThan(slow * 2)
+  })
+
+  it('стрелки стоят на чётких ударах, а не по таймеру', () => {
+    const samples = new Float32Array(SAMPLE_RATE * 30)
+    // Шумная россыпь, потом три чётких удара
+    for (let time = 2; time < 12; time += 0.13 + (time % 0.17)) addKicks(samples, time, time + 0.01, 1, () => 0.6)
+    // Первый удар после тишины может забрать пробел, поэтому ударов четыре
+    const hits = [14, 14.5, 15, 15.5]
+    for (const time of hits) addKicks(samples, time, time + 0.01, 1, () => 1)
+
+    const arrows = generateLaneLevel(analyzeAudio(samples, SAMPLE_RATE), hard).filter((note) => note.kind === 'swipe')
+    expect(arrows.length).toBeGreaterThanOrEqual(3)
+    const onHits = hits.filter((hit) => arrows.some((arrow) => Math.abs(arrow.time - hit) < 0.05))
+    expect(onHits.length).toBeGreaterThanOrEqual(3)
   })
 
   it('режим «По голосу» ставит ноту на слог, даже если он вне ритма', () => {

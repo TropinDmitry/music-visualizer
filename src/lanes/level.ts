@@ -1,14 +1,10 @@
 import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { beatWeight, pickNoteFrames } from '../game/level.ts'
 import {
-  findBeatGrid,
   findMoments,
   findSections,
   findSustains,
-  hasRhythm,
-  snapToGrid,
   songIntensity,
-  type BeatGrid,
   type Moment,
   type Section,
 } from './structure.ts'
@@ -56,7 +52,9 @@ export interface Difficulty {
   id: DifficultyId
   label: string
   minGapSec: number
-  /** Примерно раз в столько секунд появляется стрелка. */
+  /** Какую долю от самого сильного удара рядом должен набрать удар, чтобы стать нотой. */
+  strengthShare: number
+  /** Серии стрелок идут не чаще, чем раз в столько секунд. */
   arrowPeriodSec: number
   /** В сильных частях песни каждая какая нота становится парной. 0 — парных нет. */
   pairEvery: number
@@ -64,7 +62,7 @@ export interface Difficulty {
   floorGapSec: number
   /** Сколько нот максимум за любую секунду. */
   maxPerSecond: number
-  /** Сколько стрелок в серии перед сменой части. */
+  /** Сколько стрелок максимум в серии. */
   arrowRun: number
   /** На протяжных звуках два луча сразу. */
   doubleHolds: boolean
@@ -72,9 +70,9 @@ export interface Difficulty {
 }
 
 export const DIFFICULTIES: Difficulty[] = [
-  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, arrowPeriodSec: 28, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 2, doubleHolds: false, canFail: false },
-  { id: 'normal', label: 'Средняя', minGapSec: 0.3, arrowPeriodSec: 20, pairEvery: 16, floorGapSec: 0.28, maxPerSecond: 3, arrowRun: 3, doubleHolds: false, canFail: true },
-  { id: 'hard', label: 'Сложная', minGapSec: 0.18, arrowPeriodSec: 14, pairEvery: 11, floorGapSec: 0.2, maxPerSecond: 4, arrowRun: 4, doubleHolds: true, canFail: true },
+  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, arrowPeriodSec: 20, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
+  { id: 'normal', label: 'Средняя', minGapSec: 0.28, strengthShare: 0.8, arrowPeriodSec: 12, pairEvery: 16, floorGapSec: 0.26, maxPerSecond: 4, arrowRun: 3, doubleHolds: false, canFail: true },
+  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.7, arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.14, maxPerSecond: 7, arrowRun: 4, doubleHolds: true, canFail: true },
 ]
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
@@ -91,36 +89,37 @@ const BUILDUP_RUSH_GAP = 0.6
 const STAIRS = [0, 1, 2, 1]
 /** Вокруг акцента оставляем воздух, чтобы он прозвучал отдельно. */
 const ACCENT_CLEAR_SEC = 0.2
-/** Интервал между нотами умножается на это число в тихих и в сильных частях. */
-const CALM_GAP_FACTOR = 1.9
-const INTENSE_GAP_FACTOR = 0.7
-/** Выше этой силы песни редкие места заполняются дополнительными нотами. */
+/** Выше этой силы песни часть нот становится парными. */
 const INTENSE_LEVEL = 0.55
-/** Запас веса голоса над любым ударом: вес удара не бывает больше трёх. */
-const VOCAL_PRIORITY = 3
-/** В режиме «Авто» слог важнее обычного удара, но не отменяет ритм. */
-const VOCAL_AUTO_BONUS = 1.2
-/** Вне сетки ритма нота теряет столько важности. */
-const OFF_GRID_PENALTY = 0.45
-/** Удар считается попавшим в сетку, если отстоит от неё не больше этого. */
-const GRID_TOLERANCE_FRAMES = 5
+/** С чем сравниваем удар: с самым сильным в такой окрестности. */
+const STRENGTH_REACH_SEC = 2
+/** В режиме «По голосу» обычному удару нужно быть ещё заметнее. */
+const VOICE_FOCUS_BEAT_EXTRA = 0.25
+/** В обычном режиме слог становится нотой, только если он сильный: голос поверх ритма. */
+const SYLLABLE_EXTRA = 0.25
+/** Удары ближе этого играются только ровной дробью, а случайную россыпь не сыграть. */
+const FAST_GAP_SEC = 0.25
+const EVEN_GAP_TOLERANCE_SEC = 0.04
+/** Луч на месте тишины не нужен: звук должен держаться почти на прежнем уровне. */
+const HOLD_SOUND_SHARE = 0.6
 const LEAD_IN_SEC = 1.5
 const TAIL_FRAMES = 15
-/** Вокруг стрелки игра сама освобождает место: руке нужно время перейти на другие клавиши. */
-const ARROW_CLEAR_SEC = 0.45
-/** Выделяющийся удар важнее обычного, даже если стоит чуть вне сетки. */
-const PROMINENT_BONUS = 1.2
-const PROMINENCE_WINDOW_SEC = 1.5
+/** Вокруг серии стрелок игра освобождает место: руке нужно время перейти на другие клавиши. */
+const ARROW_CLEAR_SEC = 0.3
+/** Серия «пам-пам-пам»: неторопливые удары на равном расстоянии. */
+const ARROW_MIN_HITS = 3
+const ARROW_MIN_GAP_SEC = 0.26
+const ARROW_MAX_GAP_SEC = 0.9
+const ARROW_EVEN_SHARE = 0.18
+/** Во сколько раз удар серии сильнее того, что звучит между ударами. */
+const ARROW_MIN_CLARITY = 1.6
+/** Сколько секунд перед серией берём для сравнения: удары должны выделяться. */
+const ARROW_LOOK_BACK_SEC = 3
 /** Парные ноты на смене ритма не чаще этого: иначе акценты теряют вес. */
 const MIN_ACCENT_GAP_SEC = 12
 /** Смену части ищем рядом с найденным событием, чтобы попасть в реальный удар. */
 const SECTION_SNAP_SEC = 1.5
 const LONG_PAUSE_SEC = 0.55
-/** Шаг внутри серии стрелок и на сколько серия заканчивается до смены части. */
-const ARROW_RUN_GAP_SEC = 0.32
-const ARROW_RUN_SPAN_SEC = 2.4
-const ARROW_RUN_END_SEC = 0.25
-const ARROW_RUN_AVOID_SEC = 5
 /** Длинный звук играется одним лучом, но не бесконечным: рука должна отдыхать. */
 const SUSTAIN_HOLD_MAX_SEC = 6
 const SUSTAIN_HOLD_GAP_SEC = 0.35
@@ -145,7 +144,7 @@ export function generateLaneLevel(
 ): LaneNote[] {
   const moments = findMoments(analysis)
   const intensity = songIntensity(analysis)
-  const frames = pickFramesWithMoments(analysis, difficulty, moments, intensity, focus)
+  const frames = pickFramesWithMoments(analysis, difficulty, moments, focus)
   const lanes = chooseLanes(analysis, frames)
 
   const notes: LaneNote[] = []
@@ -163,50 +162,123 @@ export function generateLaneLevel(
 
   markLastNotesBeforePauses(notes, moments)
   const sections = findSections(analysis, intensity)
-  const withRuns = placeArrowRuns(notes, difficulty, sections)
-  const withArrows = placeArrows(withRuns, difficulty, sections)
-  const withPairs = addPairs(withArrows, difficulty, analysis, intensity)
-  const withHolds = addHolds(withPairs)
   const sustains = findSustains(analysis)
+  const withArrows = placeArrowSeries(notes, difficulty, analysis, sustains)
+  const withPairs = addPairs(withArrows, difficulty, analysis, intensity)
+  const withHolds = addHolds(withPairs, analysis)
   const withSustains = addSustainHolds(withHolds, difficulty, sustains)
   return limitDensity(addAccents(withSustains, moments, sections, sustains), difficulty)
 }
 
+/** Серия ровных чётких ударов, кандидат на стрелки. */
+interface ArrowSeries {
+  hits: LaneNote[]
+  score: number
+}
+
 /**
- * Серия стрелок перед сменой части: короткая россыпь чётких ударов подводит к
- * кульминации или затиханию. Рука уже на стрелках, поэтому шаг может быть короче,
- * чем между одиночной стрелкой и обычными нотами.
+ * Стрелки ставятся на чёткие удары «пам-пам-пам»: несколько нот на равном
+ * расстоянии, между которыми почти ничего не звучит. Никакого таймера: нет таких
+ * ударов, нет и стрелок. Сначала берём самые выразительные серии.
  */
-function placeArrowRuns(notes: LaneNote[], difficulty: Difficulty, sections: Section[]): LaneNote[] {
+function placeArrowSeries(
+  notes: LaneNote[],
+  difficulty: Difficulty,
+  analysis: AudioAnalysis,
+  sustains: Moment[],
+): LaneNote[] {
+  const candidates = findArrowSeries(notes, difficulty, analysis)
+  candidates.sort((a, b) => b.score - a.score)
+
+  const chosen: ArrowSeries[] = []
+  for (const series of candidates) {
+    const start = series.hits[0].time
+    if (isNearSustain(start, sustains)) continue
+    let isFree = true
+    for (const other of chosen) {
+      if (Math.abs(other.hits[0].time - start) < difficulty.arrowPeriodSec) isFree = false
+    }
+    if (isFree) chosen.push(series)
+  }
+  chosen.sort((a, b) => a.hits[0].time - b.hits[0].time)
+
   const removed = new Set<LaneNote>()
   let direction = 1
-  for (let i = 1; i < sections.length; i++) {
-    const end = sections[i].start - ARROW_RUN_END_SEC
-    const start = end - ARROW_RUN_SPAN_SEC
-    const window = notes.filter((note) => note.time >= start && note.time <= end && !removed.has(note))
-
-    // Идём от конца: последние удары перед сменой самые важные
-    const run: LaneNote[] = []
-    for (let j = window.length - 1; j >= 0 && run.length < difficulty.arrowRun; j--) {
-      const note = window[j]
-      const fitsGap = run.length === 0 || run[run.length - 1].time - note.time >= ARROW_RUN_GAP_SEC
-      if (note.kind === 'tap' && fitsGap) run.push(note)
-    }
-    if (run.length < 2) continue
-
-    run.reverse()
-    for (const note of run) {
-      note.kind = 'swipe'
-      note.direction = direction
-      direction = -direction
-    }
-    const first = run[0].time - ARROW_CLEAR_SEC
-    const last = run[run.length - 1].time + ARROW_CLEAR_SEC
+  for (const series of chosen) {
+    const first = series.hits[0].time - ARROW_CLEAR_SEC
+    const last = series.hits[series.hits.length - 1].time + ARROW_CLEAR_SEC
     for (const note of notes) {
-      if (note.time >= first && note.time <= last && !run.includes(note)) removed.add(note)
+      if (note.time >= first && note.time <= last && !series.hits.includes(note)) removed.add(note)
+    }
+    for (const hit of series.hits) {
+      hit.kind = 'swipe'
+      hit.direction = direction
+      direction = -direction
     }
   }
   return notes.filter((note) => !removed.has(note))
+}
+
+/** Перебирает ноты и собирает все ровные серии с чёткими ударами. */
+function findArrowSeries(notes: LaneNote[], difficulty: Difficulty, analysis: AudioAnalysis): ArrowSeries[] {
+  const series: ArrowSeries[] = []
+  let i = 0
+  while (i + 1 < notes.length) {
+    const gap = notes[i + 1].time - notes[i].time
+    let end = i + 1
+    const isUsableGap = gap >= ARROW_MIN_GAP_SEC && gap <= ARROW_MAX_GAP_SEC
+    while (isUsableGap && end + 1 < notes.length) {
+      const nextGap = notes[end + 1].time - notes[end].time
+      if (Math.abs(nextGap - gap) > gap * ARROW_EVEN_SHARE) break
+      end += 1
+    }
+
+    const length = Math.min(end - i + 1, difficulty.arrowRun)
+    if (isUsableGap && end - i + 1 >= ARROW_MIN_HITS) {
+      const hits = notes.slice(i, i + length)
+      const clarity = seriesClarity(hits, analysis)
+      if (clarity >= ARROW_MIN_CLARITY) {
+        series.push({ hits, score: clarity * standOut(hits, analysis) })
+      }
+      // Длинный ровный ряд даёт несколько кандидатов: лучшие выберем по силе
+      i += length
+    } else {
+      i += 1
+    }
+  }
+  return series
+}
+
+/** Удар сильнее того, что звучит между ударами: 2 значит вдвое сильнее. */
+function seriesClarity(hits: LaneNote[], analysis: AudioAnalysis): number {
+  let hitPower = 0
+  let betweenPower = 0.01
+  for (let i = 0; i < hits.length; i++) {
+    const frame = Math.round(hits[i].time * analysis.fps)
+    hitPower += peakStrength(analysis, frame - 2, frame + 3) / hits.length
+    if (i + 1 < hits.length) {
+      const nextFrame = Math.round(hits[i + 1].time * analysis.fps)
+      betweenPower = Math.max(betweenPower, peakStrength(analysis, frame + 5, nextFrame - 4))
+    }
+  }
+  return hitPower / betweenPower
+}
+
+/** Насколько серия выделяется на фоне секунд перед ней. */
+function standOut(hits: LaneNote[], analysis: AudioAnalysis): number {
+  const start = Math.round(hits[0].time * analysis.fps)
+  const before = Math.max(0, start - Math.round(ARROW_LOOK_BACK_SEC * analysis.fps))
+  let sum = 0
+  for (let frame = before; frame < start; frame++) sum += analysis.onsetStrength[frame]
+  const mean = sum / Math.max(1, start - before)
+  return peakStrength(analysis, start - 2, start + 3) / Math.max(mean, 0.01)
+}
+
+function peakStrength(analysis: AudioAnalysis, from: number, to: number): number {
+  let peak = 0
+  const last = Math.min(to, analysis.frameCount)
+  for (let frame = Math.max(0, from); frame < last; frame++) peak = Math.max(peak, analysis.onsetStrength[frame])
+  return peak
 }
 
 /**
@@ -285,99 +357,35 @@ function pressesInLastSecond(kept: LaneNote[], time: number): number {
 }
 
 /**
- * Одиночная стрелка — редкое событие внутри части: соседние ноты убираются,
- * чтобы успеть перенести руку.
+ * Какие удары становятся нотами. Каждый сравнивается с самым сильным ударом рядом:
+ * остаётся то, что слышно. Частоту никто не задаёт, она получается из самой музыки:
+ * где подряд идут равные по силе удары, там ноты частые, где редкие бочки с мелочью
+ * между ними, там редкие. Ноты стоят точно на ударах, без выравнивания.
  */
-function placeArrows(notes: LaneNote[], difficulty: Difficulty, sections: Section[]): LaneNote[] {
-  const targets: number[] = []
-  const lastTime = notes.length > 0 ? notes[notes.length - 1].time : 0
-  for (let time = difficulty.arrowPeriodSec; time < lastTime; time += difficulty.arrowPeriodSec) {
-    // Рядом с серией перед сменой части одиночная стрелка не нужна
-    let isFree = true
-    for (let i = 1; i < sections.length; i++) {
-      if (Math.abs(sections[i].start - time) < ARROW_RUN_AVOID_SEC) isFree = false
+function pickRhythmFrames(analysis: AudioAnalysis, difficulty: Difficulty, focus: NoteFocus): number[] {
+  const importance = new Map<number, number>()
+
+  const beats = pickNoteFrames(analysis, 0)
+  const beatWeights = beats.map((frame) => beatWeight(analysis, frame))
+  const beatShare = difficulty.strengthShare + (focus === 'voice' ? VOICE_FOCUS_BEAT_EXTRA : 0)
+  addAudible(importance, beats, beatWeights, beatShare, analysis.fps)
+
+  if (focus !== 'beat') {
+    const syllables: number[] = []
+    const lastFrame = analysis.frameCount - TAIL_FRAMES
+    for (let frame = Math.round(LEAD_IN_SEC * analysis.fps); frame < lastFrame; frame++) {
+      if (analysis.vocalOnsets[frame] === 1) syllables.push(frame)
     }
-    if (isFree) targets.push(time)
+    const weights = syllables.map((frame) => analysis.vocalStrength[frame])
+    const syllableShare = difficulty.strengthShare + (focus === 'voice' ? 0 : SYLLABLE_EXTRA)
+    addAudible(importance, syllables, weights, syllableShare, analysis.fps)
   }
 
-  const removed = new Set<LaneNote>()
-  let direction = 1
-  for (const target of targets) {
-    let nearest: LaneNote | null = null
-    for (const note of notes) {
-      if (note.kind !== 'tap' || removed.has(note)) continue
-      if (nearest === null || Math.abs(note.time - target) < Math.abs(nearest.time - target)) nearest = note
-    }
-    if (!nearest || Math.abs(nearest.time - target) > difficulty.arrowPeriodSec / 2) continue
-
-    nearest.kind = 'swipe'
-    nearest.direction = direction
-    direction = -direction
-    for (const note of notes) {
-      if (note !== nearest && Math.abs(note.time - nearest.time) < ARROW_CLEAR_SEC) removed.add(note)
-    }
-  }
-  return notes.filter((note) => !removed.has(note))
-}
-
-/** Минимальный интервал между нотами в этом месте песни: в сильных частях короче. */
-function localGap(frame: number, minGapSec: number, intensity: Float32Array): number {
-  const factor = CALM_GAP_FACTOR + (INTENSE_GAP_FACTOR - CALM_GAP_FACTOR) * intensity[frame]
-  return minGapSec * factor
-}
-
-/**
- * Важность кандидата на ноту. В режиме «По голосу» слог важнее всего. В остальных
- * главное ритм: нота вне сетки ощущается как рассинхрон, поэтому такие кандидаты
- * слабее, а слог лишь усиливает ноту, если она и так в такт.
- */
-function noteWeight(analysis: AudioAnalysis, frame: number, focus: NoteFocus, grid: BeatGrid): number {
-  const isVocal = analysis.vocalOnsets[frame] === 1
-  if (focus === 'voice' && isVocal) return VOCAL_PRIORITY + analysis.vocalStrength[frame]
-
-  const onGrid = !hasRhythm(grid, frame) || Math.abs(snapToGrid(grid, frame) - frame) <= GRID_TOLERANCE_FRAMES
-  let weight = beatWeight(analysis, frame) + prominence(analysis, frame) * PROMINENT_BONUS
-  if (focus === 'auto' && isVocal && onGrid) weight += VOCAL_AUTO_BONUS
-  return onGrid ? weight : weight * OFF_GRID_PENALTY
-}
-
-/** Насколько удар выделяется на фоне соседних: 0 — как все, 1 — заметно сильнее. */
-function prominence(analysis: AudioAnalysis, frame: number): number {
-  const reach = Math.round(PROMINENCE_WINDOW_SEC * analysis.fps)
-  const from = Math.max(0, frame - reach)
-  const to = Math.min(analysis.frameCount, frame + reach)
-  let sum = 0
-  for (let i = from; i < to; i++) sum += analysis.onsetStrength[i]
-  const mean = sum / Math.max(1, to - from)
-  return Math.min(1, Math.max(0, analysis.onsetStrength[frame] / Math.max(mean, 0.01) / 4 - 0.25))
-}
-
-/** Все кандидаты на ноты: удары и начала слогов. */
-function noteCandidates(analysis: AudioAnalysis, difficulty: Difficulty): number[] {
-  const candidates = pickNoteFrames(analysis, difficulty.minGapSec * INTENSE_GAP_FACTOR * 0.8)
-  const lastFrame = analysis.frameCount - TAIL_FRAMES
-  for (let frame = Math.round(LEAD_IN_SEC * analysis.fps); frame < lastFrame; frame++) {
-    if (analysis.vocalOnsets[frame] === 1) candidates.push(frame)
-  }
-  return candidates
-}
-
-/** Отбирает ноты: сначала важные, а частоту задаёт сила части песни. */
-function pickByIntensity(
-  analysis: AudioAnalysis,
-  difficulty: Difficulty,
-  intensity: Float32Array,
-  focus: NoteFocus,
-): number[] {
-  const grid = findBeatGrid(analysis)
-  const candidates = noteCandidates(analysis, difficulty)
-  const weights = new Map<number, number>()
-  for (const frame of candidates) weights.set(frame, noteWeight(analysis, frame, focus, grid))
-  candidates.sort((a, b) => (weights.get(b) ?? 0) - (weights.get(a) ?? 0))
-
+  const candidates = [...importance.keys()]
+  candidates.sort((a, b) => (importance.get(b) ?? 0) - (importance.get(a) ?? 0))
+  const gapFrames = difficulty.minGapSec * analysis.fps
   const picked: number[] = []
   for (const frame of candidates) {
-    const gapFrames = localGap(frame, difficulty.minGapSec, intensity) * analysis.fps
     let isFree = true
     for (const other of picked) {
       if (Math.abs(other - frame) < gapFrames) isFree = false
@@ -385,41 +393,45 @@ function pickByIntensity(
     if (isFree) picked.push(frame)
   }
   picked.sort((a, b) => a - b)
-  const aligned = focus === 'voice' ? picked : alignToGrid(picked, grid)
-  return fillIntenseGaps(aligned, analysis, difficulty, intensity)
+  return dropUnevenFast(picked, analysis.fps)
 }
 
-/** Подтягивает ноты, стоящие рядом с сеткой, точно на неё: так ритм ровнее на ощупь. */
-function alignToGrid(frames: number[], grid: BeatGrid): number[] {
-  const aligned: number[] = []
-  for (const frame of frames) {
-    const snapped = snapToGrid(grid, frame)
-    const target = Math.abs(snapped - frame) <= GRID_TOLERANCE_FRAMES ? snapped : frame
-    if (aligned[aligned.length - 1] !== target) aligned.push(target)
-  }
-  return aligned
-}
-
-/**
- * В припеве удары сливаются, и нот выходит мало. Если между нотами слишком
- * длинный промежуток, ставим ноту посередине: так ритм дробится вдвое и остаётся
- * в такт, потому что соседние ноты уже стоят на ударах.
- */
-function fillIntenseGaps(
+/** Оставляет удары, близкие по силе к самому сильному в окрестности. */
+function addAudible(
+  importance: Map<number, number>,
   frames: number[],
-  analysis: AudioAnalysis,
-  difficulty: Difficulty,
-  intensity: Float32Array,
-): number[] {
-  const result = [...frames]
-  for (let i = 0; i + 1 < frames.length; i++) {
-    const middle = Math.round((frames[i] + frames[i + 1]) / 2)
-    const wanted = localGap(middle, difficulty.minGapSec, intensity) * analysis.fps
-    const isLongGap = frames[i + 1] - frames[i] >= wanted * 2
-    if (intensity[middle] >= INTENSE_LEVEL && isLongGap) result.push(middle)
+  weights: number[],
+  share: number,
+  fps: number,
+): void {
+  const reach = STRENGTH_REACH_SEC * fps
+  for (let i = 0; i < frames.length; i++) {
+    let peak = 0
+    for (let j = 0; j < frames.length; j++) {
+      if (Math.abs(frames[j] - frames[i]) <= reach) peak = Math.max(peak, weights[j])
+    }
+    const ratio = peak > 0 ? weights[i] / peak : 0
+    if (ratio >= share) importance.set(frames[i], Math.max(importance.get(frames[i]) ?? 0, ratio))
   }
-  result.sort((a, b) => a - b)
-  return result
+}
+
+/** Быстрые ноты остаются, только если идут ровной дробью: её пальцы и слышат, и успевают. */
+function dropUnevenFast(frames: number[], fps: number): number[] {
+  const gapAt = (i: number) => (frames[i + 1] - frames[i]) / fps
+  const isEvenFast = (i: number) => {
+    if (i < 0 || i + 2 >= frames.length) return false
+    const isFast = gapAt(i) < FAST_GAP_SEC && gapAt(i + 1) < FAST_GAP_SEC
+    return isFast && Math.abs(gapAt(i) - gapAt(i + 1)) <= EVEN_GAP_TOLERANCE_SEC
+  }
+
+  const kept: number[] = []
+  for (let i = 0; i < frames.length; i++) {
+    const previous = kept[kept.length - 1]
+    const isClose = previous !== undefined && (frames[i] - previous) / fps < FAST_GAP_SEC
+    if (isClose && !isEvenFast(i - 2) && !isEvenFast(i - 1) && !isEvenFast(i)) continue
+    kept.push(frames[i])
+  }
+  return kept
 }
 
 /** В сильных частях часть обычных нот становится парной: припев и на ощупь мощнее. */
@@ -451,10 +463,9 @@ function pickFramesWithMoments(
   analysis: AudioAnalysis,
   difficulty: Difficulty,
   moments: Moment[],
-  intensity: Float32Array,
   focus: NoteFocus,
 ): number[] {
-  const picked = pickByIntensity(analysis, difficulty, intensity, focus)
+  const picked = pickRhythmFrames(analysis, difficulty, focus)
   const rushCandidates = pickNoteFrames(analysis, difficulty.minGapSec * BUILDUP_RUSH_GAP)
 
   const frames: number[] = []
@@ -575,22 +586,31 @@ function nearestImpact(time: number, impacts: Moment[]): number {
 }
 
 /**
- * Короткий луч ставится только там, где после ноты и правда тихо: нота как бы
- * звучит дальше. Никаких лучей по счётчику: такие не связаны со звуком.
+ * Короткий луч ставится только там, где нота и правда тянется: дальше свободно,
+ * а звук держится. Никаких лучей по счётчику: такие не связаны со звуком.
  */
-function addHolds(notes: LaneNote[]): LaneNote[] {
+function addHolds(notes: LaneNote[], analysis: AudioAnalysis): LaneNote[] {
   const result: LaneNote[] = []
   for (let i = 0; i < notes.length; i++) {
     const note = notes[i]
     const next = notes[i + 1]
     const gap = next ? next.time - note.time : 0
-    if (note.kind === 'tap' && gap >= HOLD_MIN_SEC + HOLD_END_GAP_SEC) {
-      result.push({ ...note, kind: 'hold', duration: Math.min(HOLD_MAX_SEC, gap - HOLD_END_GAP_SEC) })
+    const duration = Math.min(HOLD_MAX_SEC, gap - HOLD_END_GAP_SEC)
+    if (note.kind === 'tap' && duration >= HOLD_MIN_SEC && soundHolds(analysis, note.time, duration)) {
+      result.push({ ...note, kind: 'hold', duration })
     } else {
       result.push(note)
     }
   }
   return result
+}
+
+/** Звук в конце отрезка не сильно тише, чем в начале. */
+function soundHolds(analysis: AudioAnalysis, time: number, duration: number): boolean {
+  const start = Math.round((time + 0.1) * analysis.fps)
+  const end = Math.min(analysis.frameCount - 1, Math.round((time + duration) * analysis.fps))
+  const level = (frame: number) => analysis.mid[frame] + analysis.treble[frame]
+  return level(end) >= level(start) * HOLD_SOUND_SHARE
 }
 
 /** Для каждого удара считает «центр тяжести» спектра и делит удары на три равные группы. */

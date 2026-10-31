@@ -59,14 +59,6 @@ const SUSTAIN_MIN_RISE = 4
 const SECTION_COMPARE_SEC = 7
 const SECTION_MIN_JUMP = 0.22
 const SECTION_MIN_SEC = 12
-const GRID_STEP_SEC = 4
-const GRID_WINDOW_SEC = 8
-const GRID_MIN_BEAT_SEC = 0.33
-const GRID_MAX_BEAT_SEC = 1
-/** Ниже этого ритма считай что нет: сетка только навредит. */
-const GRID_MIN_CONFIDENCE = 1.3
-/** Какую долю от лучшего счёта должен набрать главный темп, чтобы остаться. */
-const GRID_KEEP_MAIN_SHARE = 0.6
 /** Смена тембра: шаг сетки, окно сравнения и самая малая заметная разница. */
 const TIMBRE_STEP_SEC = 0.1
 const TIMBRE_WINDOW_SEC = 1.5
@@ -250,124 +242,6 @@ function mergeClose(sustains: Moment[]): Moment[] {
     else merged.push({ ...sustain })
   }
   return merged
-}
-
-/** Сетка ритма на отрезке песни. Темп может меняться, поэтому отрезков много. */
-interface GridWindow {
-  /** Длина доли и положение первой доли, в кадрах. */
-  beatFrames: number
-  phaseFrame: number
-  /** Насколько ритм выражен: около 1 — ритма нет, например разговор. */
-  confidence: number
-}
-
-export interface BeatGrid {
-  windows: GridWindow[]
-  stepFrames: number
-}
-
-/**
- * Находит сетку долей. Автокорреляция: сравниваем поток ударов с ним же, сдвинутым
- * на разные интервалы. Если музыка ритмична, на длине доли совпадений заметно больше.
- */
-export function findBeatGrid(analysis: AudioAnalysis): BeatGrid {
-  const pulses = onsetPulses(analysis)
-  const stepFrames = Math.round(GRID_STEP_SEC * analysis.fps)
-  const length = Math.round(GRID_WINDOW_SEC * analysis.fps)
-  const minLag = Math.round(GRID_MIN_BEAT_SEC * analysis.fps)
-  const maxLag = Math.round(GRID_MAX_BEAT_SEC * analysis.fps)
-
-  // Первый проход: для каждого отрезка оцениваем все интервалы
-  const allScores: Float32Array[] = []
-  const starts: number[] = []
-  for (let center = 0; center < analysis.frameCount; center += stepFrames) {
-    const start = Math.max(0, Math.min(center - Math.round(length / 2), analysis.frameCount - length))
-    const end = Math.min(analysis.frameCount, start + length)
-    const scores = new Float32Array(maxLag + 1)
-    for (let lag = minLag; lag <= maxLag; lag++) {
-      for (let i = start; i + lag < end; i++) scores[lag] += pulses[i] * pulses[i + lag]
-    }
-    allScores.push(scores)
-    starts.push(start)
-  }
-
-  // Главный темп трека: интервал, который чаще всего побеждает
-  const wins = new Float32Array(maxLag + 2)
-  for (const scores of allScores) wins[bestLag(scores, minLag, maxLag)] += 1
-  const mainLag = bestLag(wins, minLag, maxLag)
-
-  // Второй проход: отрезок отступает от главного темпа, только если другой явно сильнее.
-  // Иначе ритм 2:3 внутри одного темпа выглядел бы как постоянная смена темпа.
-  const windows: GridWindow[] = []
-  for (let index = 0; index < allScores.length; index++) {
-    const scores = allScores[index]
-    const best = bestLag(scores, minLag, maxLag)
-    const nearMain = bestLag(scores, Math.max(minLag, mainLag - 1), Math.min(maxLag, mainLag + 1))
-    const lag = scores[nearMain] >= scores[best] * GRID_KEEP_MAIN_SHARE ? nearMain : best
-
-    let total = 0
-    for (let i = minLag; i <= maxLag; i++) total += scores[i]
-    const mean = total / (maxLag - minLag + 1)
-
-    const start = starts[index]
-    const end = Math.min(analysis.frameCount, start + length)
-    let phaseFrame = start
-    let bestPhaseScore = -1
-    for (let phase = 0; phase < lag; phase++) {
-      let score = 0
-      for (let i = start + phase; i < end; i += lag) score += pulses[i]
-      if (score > bestPhaseScore) {
-        bestPhaseScore = score
-        phaseFrame = start + phase
-      }
-    }
-    windows.push({ beatFrames: lag, phaseFrame, confidence: mean > 0 ? scores[lag] / mean : 1 })
-  }
-  return { windows, stepFrames }
-}
-
-function bestLag(scores: Float32Array, from: number, to: number): number {
-  let best = from
-  for (let lag = from; lag <= to; lag++) {
-    if (scores[lag] > scores[best]) best = lag
-  }
-  return best
-}
-
-/**
- * Сами удары в виде коротких импульсов. Сплошная кривая не подходит: соседние кадры
- * в ней похожи, и автокорреляция всегда выбирала самый короткий интервал.
- */
-function onsetPulses(analysis: AudioAnalysis): Float32Array {
-  const pulses = new Float32Array(analysis.frameCount)
-  for (let frame = 0; frame < analysis.frameCount; frame++) {
-    if (analysis.onsets[frame] !== 1) continue
-    const value = analysis.onsetStrength[frame] + beatBass(analysis, frame)
-    for (let i = Math.max(0, frame - 2); i <= Math.min(analysis.frameCount - 1, frame + 2); i++) {
-      pulses[i] = Math.max(pulses[i], value)
-    }
-  }
-  return pulses
-}
-
-/** Бас сразу после удара: доли обычно отмечены именно низом. */
-function beatBass(analysis: AudioAnalysis, frame: number): number {
-  return analysis.bass[Math.min(frame + 4, analysis.frameCount - 1)]
-}
-
-/** Ближайшая к кадру точка сетки на половинных долях; без ритма — сам кадр. */
-export function snapToGrid(grid: BeatGrid, frame: number): number {
-  const index = Math.min(grid.windows.length - 1, Math.round(frame / grid.stepFrames))
-  const window = grid.windows[index]
-  if (window.confidence < GRID_MIN_CONFIDENCE) return frame
-  const half = window.beatFrames / 2
-  return Math.round(window.phaseFrame + Math.round((frame - window.phaseFrame) / half) * half)
-}
-
-/** Есть ли в этом месте песни выраженный ритм. */
-export function hasRhythm(grid: BeatGrid, frame: number): boolean {
-  const index = Math.min(grid.windows.length - 1, Math.round(frame / grid.stepFrames))
-  return grid.windows[index].confidence >= GRID_MIN_CONFIDENCE
 }
 
 export function findMoments(analysis: AudioAnalysis): Moment[] {
