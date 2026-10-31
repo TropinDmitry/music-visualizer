@@ -164,6 +164,59 @@ describe('analyzeAudio: общее', () => {
   })
 })
 
+describe('analyzeAudio: голос', () => {
+  /** Слог: тон с формантами на 600 и 1800 Гц, нарастает и спадает, как гласная. */
+  function addSyllable(signal: Float32Array, time: number): void {
+    const start = Math.round(time * SAMPLE_RATE)
+    const length = Math.round(0.14 * SAMPLE_RATE)
+    for (let i = 0; i < length; i++) {
+      const t = i / SAMPLE_RATE
+      const envelope = Math.sin((Math.PI * i) / length)
+      signal[start + i] +=
+        envelope * (0.3 * Math.sin(2 * Math.PI * 600 * t) + 0.15 * Math.sin(2 * Math.PI * 1800 * t))
+    }
+  }
+
+  /** Бочка: низкий тон с резким началом. */
+  function addKick(signal: Float32Array, time: number): void {
+    const start = Math.round(time * SAMPLE_RATE)
+    const length = Math.round(0.3 * SAMPLE_RATE)
+    for (let i = 0; i < length; i++) {
+      const t = i / SAMPLE_RATE
+      signal[start + i] += 0.9 * Math.sin(2 * Math.PI * 60 * t) * Math.exp(-t * 14)
+    }
+  }
+
+  it('слоги находятся, а бочка нет', () => {
+    const signal = new Float32Array(SAMPLE_RATE * 8)
+    const syllables = [1.1, 1.6, 2.1, 2.6, 3.1, 3.6, 4.1, 4.6, 5.1, 5.6, 6.1]
+    for (const time of syllables) addSyllable(signal, time)
+    for (let time = 1; time < 7; time += 1) addKick(signal, time + 0.25)
+
+    const a = analyzeAudio(signal, SAMPLE_RATE)
+    const found: number[] = []
+    for (let frame = 0; frame < a.frameCount; frame++) {
+      if (a.vocalOnsets[frame]) found.push(frame / a.fps)
+    }
+
+    for (const syllable of syllables) {
+      let error = Infinity
+      for (const time of found) error = Math.min(error, Math.abs(time - syllable))
+      expect(error).toBeLessThan(0.1)
+    }
+    let notesOnKicks = 0
+    for (const time of found) {
+      if (Math.abs(((time - 0.25) % 1) - 0) < 0.03) notesOnKicks += 1
+    }
+    expect(notesOnKicks).toBeLessThanOrEqual(1)
+  })
+
+  it('в тишине голоса нет', () => {
+    const a = analyzeAudio(new Float32Array(SAMPLE_RATE), SAMPLE_RATE)
+    expect(Math.max(...a.vocalOnsets)).toBe(0)
+  })
+})
+
 describe('демо-трек', () => {
   it('удары бочки (каждые 0,5 с) находятся детектором', () => {
     const { left, right, sampleRate } = synthesizeDemoTrack(6)

@@ -41,20 +41,50 @@ describe('generateLaneLevel', () => {
 
   it('используются все три дорожки и нет трёх нот подряд на одной', () => {
     for (const difficulty of DIFFICULTIES) {
-      const allNotes = generateLaneLevel(analysis, difficulty)
-      const notes = allNotes.filter((note) => note.kind !== 'accent' && note.kind !== 'space')
+      const notes = generateLaneLevel(analysis, difficulty)
       expect(new Set(notes.map((note) => note.lane)).size).toBe(3)
       for (let i = 2; i < notes.length; i++) {
-        // Длинная пауза после луча разрывает серию, поэтому здесь её не считаем
+        const three = [notes[i - 2], notes[i - 1], notes[i]]
+        // Парная нота и пауза после луча разрывают серию, поэтому здесь их не считаем
+        const hasBreak = three.some((note) => note.kind === 'accent' || note.kind === 'space')
         const isContinuous = notes[i].time - notes[i - 2].time < 0.9
-        const sameThree = notes[i].lane === notes[i - 1].lane && notes[i].lane === notes[i - 2].lane
-        expect(isContinuous && sameThree).toBe(false)
+        const sameLane = three.every((note) => note.lane === notes[i].lane)
+        expect(!hasBreak && isContinuous && sameLane).toBe(false)
       }
     }
   })
 
-  it('есть свайпы в обе стороны', () => {
-    const swipes = generateLaneLevel(analysis, hard).filter((note) => note.kind === 'swipe')
+  it('стрелки идут только в спокойных местах и с запасом времени', () => {
+    const quietThenLoud = new Float32Array(44100 * 40)
+    for (let time = 2; time < 38; time += 0.8) {
+      const volume = time < 20 ? 0.2 : 0.95
+      const start = Math.round(time * 44100)
+      for (let i = 0; i < 0.4 * 44100; i++) {
+        const t = i / 44100
+        quietThenLoud[start + i] += volume * Math.sin(2 * Math.PI * 70 * t) * Math.exp(-t * 12)
+      }
+    }
+    const track = analyzeAudio(quietThenLoud, 44100)
+    const intensity = songIntensity(track)
+    const notes = generateLaneLevel(track, hard)
+    for (let i = 0; i < notes.length; i++) {
+      if (notes[i].kind !== 'swipe') continue
+      expect(intensity[Math.round(notes[i].time * track.fps)]).toBeLessThanOrEqual(0.45)
+      if (i > 0) expect(notes[i].time - notes[i - 1].time).toBeGreaterThanOrEqual(0.5)
+    }
+  })
+
+  it('есть стрелки в обе стороны', () => {
+    const relaxed = new Float32Array(44100 * 40)
+    for (let time = 2; time < 38; time += 0.9) {
+      const volume = time < 26 ? 0.2 : 0.9
+      const start = Math.round(time * 44100)
+      for (let i = 0; i < 0.4 * 44100; i++) {
+        const t = i / 44100
+        relaxed[start + i] += volume * Math.sin(2 * Math.PI * 70 * t) * Math.exp(-t * 12)
+      }
+    }
+    const swipes = generateLaneLevel(analyzeAudio(relaxed, 44100), hard).filter((note) => note.kind === 'swipe')
     expect(new Set(swipes.map((note) => note.direction))).toEqual(new Set([-1, 1]))
   })
 
@@ -300,6 +330,15 @@ describe('правила', () => {
     expect(streakTier(500)).toBe(4)
     expect(streakProgress(17)).toBeCloseTo(7 / 15)
     expect(streakProgress(500)).toBe(1)
+  })
+
+  it('ноты в первую очередь встают на слоги', () => {
+    const track = analyzeAudio(new Float32Array(44100 * 10), 44100)
+    const vocalFrame = Math.round(4 * track.fps)
+    track.vocalOnsets[vocalFrame] = 1
+    track.vocalStrength[vocalFrame] = 1
+    const notes = generateLaneLevel(track, easy)
+    expect(notes.some((note) => Math.abs(note.time - 4) < 0.02)).toBe(true)
   })
 
   it('событие стрелки сообщает направление для отлёта', () => {

@@ -33,17 +33,17 @@ export interface Difficulty {
   id: DifficultyId
   label: string
   minGapSec: number
-  /** Каждая какая нота становится свайпом. */
-  swipeEvery: number
+  /** Каждое какое подходящее место в спокойной части становится стрелкой. */
+  arrowEvery: number
   /** В сильных частях песни каждая какая нота становится парной. 0 — парных нет. */
   pairEvery: number
   canFail: boolean
 }
 
 export const DIFFICULTIES: Difficulty[] = [
-  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, swipeEvery: 12, pairEvery: 0, canFail: false },
-  { id: 'normal', label: 'Средняя', minGapSec: 0.3, swipeEvery: 8, pairEvery: 11, canFail: true },
-  { id: 'hard', label: 'Сложная', minGapSec: 0.18, swipeEvery: 6, pairEvery: 7, canFail: true },
+  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, arrowEvery: 3, pairEvery: 0, canFail: false },
+  { id: 'normal', label: 'Средняя', minGapSec: 0.3, arrowEvery: 2, pairEvery: 11, canFail: true },
+  { id: 'hard', label: 'Сложная', minGapSec: 0.18, arrowEvery: 2, pairEvery: 7, canFail: true },
 ]
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
@@ -66,6 +66,14 @@ const CALM_GAP_FACTOR = 1.9
 const INTENSE_GAP_FACTOR = 0.7
 /** Выше этой силы песни редкие места заполняются дополнительными нотами. */
 const INTENSE_LEVEL = 0.55
+/** Запас веса голоса над любым ударом: вес удара не бывает больше трёх. */
+const VOCAL_PRIORITY = 3
+const LEAD_IN_SEC = 1.5
+const TAIL_FRAMES = 15
+/** Стрелки только в спокойных местах: в сильной части руке и без них хватает работы. */
+const ARROW_MAX_INTENSITY = 0.45
+/** Свободное время вокруг стрелки, чтобы успеть перенести руку на другие клавиши. */
+const ARROW_CLEAR_SEC = 0.55
 
 export function findDifficulty(id: DifficultyId): Difficulty {
   for (const difficulty of DIFFICULTIES) {
@@ -83,9 +91,15 @@ export function generateLaneLevel(analysis: AudioAnalysis, difficulty: Difficult
   const notes: LaneNote[] = []
   let swipeDirection = 1
   let stairStep = 0
+  let arrowCandidates = 0
   for (let i = 0; i < frames.length; i++) {
     const time = frames[i] / analysis.fps
-    const isSwipe = (i + 1) % difficulty.swipeEvery === 0
+    const hasRoom =
+      (i === 0 || time - frames[i - 1] / analysis.fps >= ARROW_CLEAR_SEC) &&
+      (i === frames.length - 1 || frames[i + 1] / analysis.fps - time >= ARROW_CLEAR_SEC)
+    const canBeArrow = hasRoom && intensity[frames[i]] <= ARROW_MAX_INTENSITY && !isInRush(time, moments)
+    if (canBeArrow) arrowCandidates += 1
+    const isSwipe = canBeArrow && arrowCandidates % difficulty.arrowEvery === 0
     const isStar = !isSwipe && (i + 1) % STAR_EVERY === 0
     if (isSwipe) swipeDirection = -swipeDirection
 
@@ -112,10 +126,29 @@ function localGap(frame: number, minGapSec: number, intensity: Float32Array): nu
   return minGapSec * factor
 }
 
-/** Отбирает удары: сначала важные, а частоту задаёт сила части песни. */
-function pickByIntensity(analysis: AudioAnalysis, difficulty: Difficulty, intensity: Float32Array): number[] {
+/**
+ * Важность кандидата на ноту. Голос важнее всего: игрок поёт песню про себя
+ * и ждёт ноту на слове, а удары заполняют то, что осталось без голоса.
+ */
+function noteWeight(analysis: AudioAnalysis, frame: number): number {
+  if (analysis.vocalOnsets[frame] === 1) return VOCAL_PRIORITY + analysis.vocalStrength[frame]
+  return beatWeight(analysis, frame)
+}
+
+/** Все кандидаты на ноты: удары и начала слогов. */
+function noteCandidates(analysis: AudioAnalysis, difficulty: Difficulty): number[] {
   const candidates = pickNoteFrames(analysis, difficulty.minGapSec * INTENSE_GAP_FACTOR * 0.8)
-  candidates.sort((a, b) => beatWeight(analysis, b) - beatWeight(analysis, a))
+  const lastFrame = analysis.frameCount - TAIL_FRAMES
+  for (let frame = Math.round(LEAD_IN_SEC * analysis.fps); frame < lastFrame; frame++) {
+    if (analysis.vocalOnsets[frame] === 1) candidates.push(frame)
+  }
+  return candidates
+}
+
+/** Отбирает ноты: сначала важные, а частоту задаёт сила части песни. */
+function pickByIntensity(analysis: AudioAnalysis, difficulty: Difficulty, intensity: Float32Array): number[] {
+  const candidates = noteCandidates(analysis, difficulty)
+  candidates.sort((a, b) => noteWeight(analysis, b) - noteWeight(analysis, a))
 
   const picked: number[] = []
   for (const frame of candidates) {

@@ -161,6 +161,7 @@ function saveBestScore(key: string, score: number): void {
 function popupText(event: LaneEvent): string {
   if (event.type === 'miss') return 'мимо'
   if (event.type === 'holdBroken') return 'луч оборван'
+  if (event.kind === 'space') return `SPACE! +${event.points}`
   return `${event.kind === 'star' ? '★ ' : ''}+${event.points}`
 }
 
@@ -290,8 +291,8 @@ export function LanesApp() {
       } else {
         scene.hitEffect(event.lane, event.type === 'perfect' || event.type === 'holdDone', clockTime)
         if (event.kind === 'space') {
-          scene.impactEffect(clockTime)
-          sounds?.star()
+          scene.spaceHitEffect(clockTime)
+          sounds?.space()
         }
         if (event.type === 'holdDone') sounds?.holdDone()
         if (event.kind === 'swipe') {
@@ -482,6 +483,7 @@ export function LanesApp() {
     space() {
       const time = playingTime()
       const game = gameRef.current
+      sceneRef.current?.spacePressEffect()
       if (time !== null && game) eventHandlerRef.current(pressSpace(game, time))
     },
     release(lane: number) {
@@ -905,7 +907,7 @@ export function LanesApp() {
 
           <ul className="legend">
             <li>Пурпурный круг: клавиша A, S, D или нажатие на дорожку</li>
-            <li>Белый круг со стрелкой: ← или → либо смахивание в ту же сторону</li>
+            <li>Белый круг со стрелкой: ← или → либо смахивание, только в спокойных местах</li>
             <li>Золотая звезда: три звезды включают суперрежим, очки ×2 на 8 секунд</li>
             <li>Пурпурный круг с лучом: зажмите и держите до конца</li>
             <li>Парная нота: две клавиши сразу</li>

@@ -58,6 +58,14 @@ export class SoundEffects {
     source.stop(now + 0.32)
   }
 
+  /** Пробел: воздух и низкая нота вместе, самый весомый звук игры. */
+  space(): void {
+    const now = this.context.currentTime
+    this.arrow(0)
+    this.pluck(now, 130.8, 0.6, 0.2)
+    this.pluck(now, 392, 0.45, 0.1)
+  }
+
   /** Звезда: две мягкие ноты вверх. */
   star(): void {
     const now = this.context.currentTime

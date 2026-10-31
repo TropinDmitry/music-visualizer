@@ -66,6 +66,7 @@ const MAX_SPACE_BARS = 4
 /** Длинная нота шире всех трёх дорожек, в долях расстояния между ними. */
 const SPACE_BAR_WIDTH = 2.7
 const SPACE_BAR_DEPTH = 0.62
+const SPACE_BURST_SEC = 0.6
 const MAX_SPARKS = 160
 const SPARK_LIFETIME_SEC = 0.45
 const MAX_SHOCKWAVES = 8
@@ -458,6 +459,35 @@ function createSpaceTexture(): THREE.CanvasTexture {
   return texture
 }
 
+/** Нажатая плашка распадается на мелкие кусочки: порог растёт, и всё больше точек исчезает. */
+const spaceBurstVertex = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`
+
+const spaceBurstFragment = /* glsl */ `
+  uniform sampler2D uMap;
+  uniform float uDissolve;
+  varying vec2 vUv;
+
+  float grain(vec2 cell) {
+    return fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+  }
+
+  void main() {
+    vec4 texel = texture2D(uMap, vUv);
+    float noise = grain(floor(vUv * vec2(90.0, 22.0)));
+    // Край исчезающей области горит: так виден именно распад, а не простое затухание
+    float edge = smoothstep(uDissolve, uDissolve + 0.12, noise);
+    if (edge <= 0.0) discard;
+    vec3 color = mix(vec3(0.75, 0.9, 1.0), texel.rgb, edge);
+    gl_FragColor = vec4(color, texel.a * edge * (1.0 - uDissolve * 0.4));
+  }
+`
+
 /** Мягкое пятно света для ореола вокруг ноты. */
 function createHaloTexture(): THREE.CanvasTexture {
   const size = 96
@@ -614,6 +644,8 @@ export class LaneScene {
   private readonly plainCoins: THREE.InstancedMesh
   private readonly noteHalos: THREE.InstancedMesh
   private readonly spaceBars: THREE.Mesh[] = []
+  private readonly spaceBurst: THREE.Mesh<THREE.PlaneGeometry, THREE.ShaderMaterial>
+  private spaceBurstAt = -Infinity
   private readonly swipeNotes: THREE.InstancedMesh
   private readonly starNotes: THREE.InstancedMesh
   private readonly noteShadows: THREE.InstancedMesh
@@ -701,6 +733,22 @@ export class LaneScene {
       side: THREE.DoubleSide,
     })
     const spaceGeometry = new THREE.PlaneGeometry(1, 1)
+    this.spaceBurst = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.ShaderMaterial({
+        uniforms: { uMap: { value: spaceMaterial.map }, uDissolve: { value: 0 } },
+        vertexShader: spaceBurstVertex,
+        fragmentShader: spaceBurstFragment,
+        transparent: true,
+        depthTest: false,
+        side: THREE.DoubleSide,
+      }),
+    )
+    this.spaceBurst.rotation.x = NOTE_TILT - Math.PI / 2
+    this.spaceBurst.visible = false
+    this.spaceBurst.frustumCulled = false
+    this.spaceBurst.renderOrder = 6
+    this.scene.add(this.spaceBurst)
     for (let i = 0; i < MAX_SPACE_BARS; i++) {
       const bar = new THREE.Mesh(spaceGeometry, spaceMaterial)
       // Лежит в плоскости дорожки, как и всё остальное
@@ -848,6 +896,31 @@ export class LaneScene {
     this.sharedUniforms.uOverdrive.value += (overdrive - this.sharedUniforms.uOverdrive.value) * 0.1
   }
 
+  /** Пробел попал: плашка вспыхивает, растёт и рассыпается. */
+  spaceHitEffect(clockTime: number): void {
+    this.spaceBurstAt = clockTime
+    this.spaceBurst.visible = true
+    for (let lane = 0; lane < 3; lane++) this.hitEffect(lane, true, clockTime)
+  }
+
+  /** Пробел нажат без ноты: кнопки слегка отзываются, чтобы нажатие было видно. */
+  spacePressEffect(): void {
+    for (let lane = 0; lane < 3; lane++) this.pressEffect(lane)
+  }
+
+  private updateSpaceBurst(clockTime: number): void {
+    const age = (clockTime - this.spaceBurstAt) / SPACE_BURST_SEC
+    if (age >= 1) {
+      this.spaceBurst.visible = false
+      return
+    }
+    // Быстро вырастает в начале и дальше почти не меняется, пока рассыпается
+    const growth = 1 + 1.1 * (1 - Math.pow(1 - age, 3))
+    this.spaceBurst.position.set(0, HIT_Y + 0.12 * age, 0)
+    this.spaceBurst.scale.set(this.spread * SPACE_BAR_WIDTH * growth, this.spread * SPACE_BAR_DEPTH * growth, 1)
+    this.spaceBurst.material.uniforms.uDissolve.value = age
+  }
+
   /** Взрыв песни: волны сразу от всех кнопок. Клип при этом не вспыхивает. */
   impactEffect(clockTime: number): void {
     for (let lane = 0; lane < 3; lane++) {
@@ -970,6 +1043,7 @@ export class LaneScene {
     this.updateBeams(features.time, notes, firstNote, judged, approachSec, holdingNotes)
     this.emitHoldSparks(holdingNotes, clockTime)
     this.updateFlyingArrows(clockTime)
+    this.updateSpaceBurst(clockTime)
     this.updateSparks(clockTime)
     this.updateShockwaves(clockTime)
 

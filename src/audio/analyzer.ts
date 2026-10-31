@@ -61,6 +61,13 @@ export interface AudioAnalysis {
   onsetStrength: Float32Array
   /** 1 — на этом кадре найден удар. */
   onsets: Uint8Array
+  /**
+   * Вероятное начало слога певца. Это не распознавание речи: ищем рост энергии
+   * в полосе голоса, которого нет на краях спектра. Бочка живёт внизу, хэт вверху,
+   * а новый слог поднимает именно середину. Малый барабан и гитара могут обмануть.
+   */
+  vocalOnsets: Uint8Array
+  vocalStrength: Float32Array
   /** Времена ударов в секундах. */
   onsetTimes: number[]
   /** 1 в момент удара, затем экспоненциально затухает к 0. Удобно для вспышек. */
@@ -78,6 +85,13 @@ export interface AudioAnalysis {
 
 /** Всё тише −80 дБ считаем тишиной: иначе шум округления давал бы «удары». */
 const FLUX_FLOOR_DB = -80
+/** Полоса, где сосредоточена энергия голоса и его разборчивость, в герцах. */
+const VOCAL_LOW_HZ = 300
+const VOCAL_HIGH_HZ = 3400
+/** Быстрее этого слоги в песне почти не идут. */
+const VOCAL_MIN_GAP_SEC = 0.12
+/** Насколько рост вне полосы голоса гасит рост в ней: так отсекаются удары. */
+const VOCAL_DRUM_PENALTY = 0.8
 
 export type ProgressCallback = (fraction: number) => void
 
@@ -115,12 +129,15 @@ export function analyzeAudio(
   const frame = new Float32Array(fftSize)
   const mags = new Float32Array(half + 1)
   const prevSpectrumDb = new Float32Array(spectrumBins).fill(FLUX_FLOOR_DB)
+  const isVocalBin = markVocalBins(spectrumBins, Math.min(16000, sampleRate / 2))
 
   const rawBass = new Float32Array(frameCount)
   const rawMid = new Float32Array(frameCount)
   const rawTreble = new Float32Array(frameCount)
   const rawRms = new Float32Array(frameCount)
   const flux = new Float32Array(frameCount)
+  const vocalRise = new Float32Array(frameCount)
+  const otherRise = new Float32Array(frameCount)
   const spectrumDb = new Float32Array(frameCount * spectrumBins)
 
   const bandRange = ([lo, hi]: [number, number]) =>
@@ -172,7 +189,11 @@ export function analyzeAudio(
       // Считаем по логарифмическим столбикам, а не по бинам FFT: иначе
       // широкополосный хэт (сотни бинов) «перекрикивает» бочку (пара бинов).
       const rise = db - prevSpectrumDb[b]
-      if (f > 0 && rise > 0) flux[f] += rise
+      if (f > 0 && rise > 0) {
+        flux[f] += rise
+        if (isVocalBin[b]) vocalRise[f] += rise
+        else otherRise[f] += rise
+      }
       prevSpectrumDb[b] = db
     }
 
@@ -188,6 +209,9 @@ export function analyzeAudio(
 
   const { onsets, onsetTimes } = detectOnsets(flux, fps, opts.onset)
   const onsetStrength = normalize(flux, 1)
+  const vocalFlux = vocalOnsetCurve(vocalRise, otherRise, isVocalBin)
+  const vocalStrength = normalize(vocalFlux, 0.5)
+  const { onsets: vocalOnsets } = detectOnsets(vocalFlux, fps, { ...opts.onset, minGapSec: VOCAL_MIN_GAP_SEC })
   const beatPulse = makeBeatPulse(onsets, fps, opts.onset.pulseDecaySec)
 
   const energyIntegral = new Float32Array(frameCount)
@@ -214,6 +238,8 @@ export function analyzeAudio(
     raw: { bass: rawBass, mid: rawMid, treble: rawTreble, rms: rawRms },
     onsetStrength,
     onsets,
+    vocalOnsets,
+    vocalStrength,
     onsetTimes,
     beatPulse,
     energyIntegral,
@@ -353,6 +379,33 @@ function normalizeSpectrum(db: Float32Array): Float32Array {
     out[i] = Math.min(1, Math.max(0, (db[i] - bottom) / RANGE_DB))
   }
   return out
+}
+
+/** Какие столбики логарифмического спектра попадают в полосу голоса. */
+function markVocalBins(bins: number, maxHz: number): boolean[] {
+  const marks: boolean[] = []
+  const ratio = maxHz / 30
+  for (let b = 0; b < bins; b++) {
+    const hz = 30 * Math.pow(ratio, (b + 0.5) / bins)
+    marks.push(hz >= VOCAL_LOW_HZ && hz <= VOCAL_HIGH_HZ)
+  }
+  return marks
+}
+
+/** Средний рост в полосе голоса минус рост вне её: удар поднимает весь спектр и гасится. */
+function vocalOnsetCurve(vocalRise: Float32Array, otherRise: Float32Array, isVocalBin: boolean[]): Float32Array {
+  let vocalBins = 0
+  for (const isVocal of isVocalBin) {
+    if (isVocal) vocalBins += 1
+  }
+  const otherBins = Math.max(1, isVocalBin.length - vocalBins)
+  const curve = new Float32Array(vocalRise.length)
+  for (let i = 0; i < curve.length; i++) {
+    const inside = vocalRise[i] / Math.max(1, vocalBins)
+    const outside = otherRise[i] / otherBins
+    curve[i] = Math.max(0, inside - VOCAL_DRUM_PENALTY * outside)
+  }
+  return curve
 }
 
 /** То же сглаживание огибающей, но для каждого столбика спектра отдельно. */
