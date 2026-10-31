@@ -46,8 +46,6 @@ const INTENSITY_WINDOW_SEC = 5
 const SUSTAIN_STEP_SEC = 0.25
 const SUSTAIN_WINDOW_SEC = 1.5
 const SUSTAIN_MIN_SEC = 1.5
-/** Насколько позже найденного начала ещё может стоять удар, запустивший звук. */
-const SUSTAIN_START_SLACK_SEC = 0.1
 const SUSTAIN_MERGE_GAP_SEC = 1
 /** Мягкая пульсация: сравниваем спектр до и после момента, ударов тут детектор не видит. */
 const PULSE_STEP_FRAMES = 3
@@ -61,11 +59,13 @@ const PULSE_MIN_PROMINENCE = 1.3
 const PULSE_SAME_SOUND = 0.7
 /** Такая смена спектра значит, что музыка стала другой: протяжный звук здесь кончился. */
 const BIG_CHANGE = 0.03
-/** В активных частях шаг ритма ищем по отрезкам: темп и рисунок внутри песни меняются. */
-const ACTIVE_WINDOW_SEC = 10
-const ACTIVE_LEVEL = 0.55
+/** Песня делится на отрезки, и у каждого свой режим: темп и рисунок внутри песни меняются. */
+const PART_SEC = 8
+/** Ритм выражен ярко, если настоящих ударов в цепочке не меньше этой доли. */
+const RHYTHM_HIT_SHARE = 0.6
+const RHYTHM_MIN_HITS = 5
 /** Шаг короче этого удваиваем: рисунок на него не ляжет, рука не успеет. */
-const ACTIVE_MIN_STEP_SEC = 0.6
+const RHYTHM_MIN_STEP_SEC = 0.6
 /** И она должна быть внезапной: плавный взлёт тона меняет спектр постоянно. */
 const BIG_CHANGE_SHARPNESS = 3
 /** Какой шаг считается пульсом и сколько ударов подряд нужно, чтобы поверить в него. */
@@ -249,7 +249,7 @@ export function findSustains(analysis: AudioAnalysis): Moment[] {
     // Окно подсчёта ударов смотрит и назад, поэтому участок признаётся протяжным
     // с опозданием на половину окна. Возвращаем начало к удару, с которого звук пошёл.
     const detected = (block * stepFrames) / fps
-    const start = lastOnsetBefore(analysis, detected + SUSTAIN_START_SLACK_SEC, detected - SUSTAIN_WINDOW_SEC)
+    const start = soundStart(analysis, detected)
     const stop = ((end + 1) * stepFrames) / fps
     if (stop - start >= SUSTAIN_MIN_SEC) sustains.push({ kind: 'sustain', start, end: stop })
     block = end + 1
@@ -277,41 +277,40 @@ export function findSoftPulses(analysis: AudioAnalysis, sustains: Moment[]): num
   return pulses
 }
 
-/**
- * Шаг ритма в активных частях: для каждого отрезка своя ровная цепочка ударов.
- * Участки с лучами и мягким пульсом пропускаем, у них свой рисунок.
- */
-export function findActivePulses(
-  analysis: AudioAnalysis,
-  intensity: Float32Array,
-  sustains: Moment[],
-  softPulses: number[],
-): number[][] {
-  const chains: number[][] = []
-  for (let start = 0; start + ACTIVE_WINDOW_SEC <= analysis.duration; start += ACTIVE_WINDOW_SEC) {
-    const end = start + ACTIVE_WINDOW_SEC
-    if (meanIntensity(intensity, analysis.fps, start, end) < ACTIVE_LEVEL) continue
-    const isBusy = sustains.some((sustain) => sustain.start < end && sustain.end > start)
-    if (isBusy || softPulses.some((time) => time >= start && time < end)) continue
-
-    const peaks = analysis.onsetTimes.filter((time) => time >= start && time < end)
-    const chain = longestChain(peaks)
-    if (chain.length > 0) chains.push(longEnoughStep(chain))
-  }
-  return chains
+/** Отрезок песни: chain — ровная цепочка ударов, если ритм выражен, иначе пусто. */
+export interface SongPart {
+  start: number
+  end: number
+  chain: number[]
 }
 
-function meanIntensity(intensity: Float32Array, fps: number, fromSec: number, toSec: number): number {
-  const from = Math.round(fromSec * fps)
-  const to = Math.min(intensity.length, Math.round(toSec * fps))
-  let sum = 0
-  for (let frame = from; frame < to; frame++) sum += intensity[frame]
-  return sum / Math.max(1, to - from)
+/**
+ * Решает для каждого отрезка, идти за ритмом или за яркими звуками. Ритм берём,
+ * только если он выражен: почти каждый шаг цепочки попадает в настоящий удар.
+ * Участки с лучами и мягким пульсом пропускаем, у них свой рисунок.
+ */
+export function findSongParts(analysis: AudioAnalysis, sustains: Moment[], softPulses: number[]): SongPart[] {
+  const parts: SongPart[] = []
+  for (let start = 0; start < analysis.duration; start += PART_SEC) {
+    const end = Math.min(analysis.duration, start + PART_SEC)
+    const isBusy = sustains.some((sustain) => sustain.start < end && sustain.end > start)
+    const hasPulse = softPulses.some((time) => time >= start && time < end)
+    const peaks = analysis.onsetTimes.filter((time) => time >= start && time < end)
+    const chain = isBusy || hasPulse ? [] : longestChain(peaks, RHYTHM_MIN_HITS)
+
+    let hits = 0
+    for (const time of chain) {
+      if (peaks.includes(time)) hits += 1
+    }
+    const isClear = chain.length > 0 && hits / chain.length >= RHYTHM_HIT_SHARE
+    parts.push({ start, end, chain: isClear ? longEnoughStep(chain) : [] })
+  }
+  return parts
 }
 
 function longEnoughStep(chain: number[]): number[] {
   const step = (chain[chain.length - 1] - chain[0]) / (chain.length - 1)
-  if (step >= ACTIVE_MIN_STEP_SEC) return chain
+  if (step >= RHYTHM_MIN_STEP_SEC) return chain
   return chain.filter((_, index) => index % 2 === 0)
 }
 
@@ -424,7 +423,7 @@ function extendBack(chain: number[], sustains: Moment[]): number[] {
  * а при равенстве берём шаг длиннее, иначе половинный шаг выиграл бы за счёт
  * придуманных ударов между настоящими.
  */
-function longestChain(peaks: number[]): number[] {
+function longestChain(peaks: number[], minHits = PULSE_MIN_HITS): number[] {
   let best: number[] = []
   let bestHits = 0
   for (const start of peaks) {
@@ -440,7 +439,7 @@ function longestChain(peaks: number[]): number[] {
       }
     }
   }
-  return bestHits >= PULSE_MIN_HITS ? best : []
+  return bestHits >= minHits ? best : []
 }
 
 /** Идёт от удара с шагом. Один пропуск прощаем: мягкий удар мог не найтись. */
@@ -465,14 +464,15 @@ function walkChain(peaks: number[], start: number, period: number): number[] {
   return chain.slice(0, chain.length - misses)
 }
 
-/** Последний удар на отрезке времени; если ударов нет, начало отрезка. */
-function lastOnsetBefore(analysis: AudioAnalysis, latest: number, earliest: number): number {
-  let found = Math.max(0, earliest + SUSTAIN_WINDOW_SEC / 2)
-  for (const onset of analysis.onsetTimes) {
-    if (onset > latest) break
-    if (onset >= earliest) found = onset
+/** Звук начинается с самой сильной смены рядом с местом, где участок признан протяжным. */
+function soundStart(analysis: AudioAnalysis, detected: number): number {
+  // Окно подсчёта ударов центрировано, поэтому звук мог начаться и до, и после
+  const reach = SUSTAIN_WINDOW_SEC / 2
+  let best: SoundChange | null = null
+  for (const change of spectrumChanges(analysis, detected - reach, detected + reach)) {
+    if (!best || change.size > best.size) best = change
   }
-  return found
+  return best ? best.time : detected
 }
 
 /** Соседние протяжные участки с крошечным разрывом это один звук. */

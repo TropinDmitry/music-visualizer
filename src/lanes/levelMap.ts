@@ -1,6 +1,7 @@
 import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { audioBufferToMono, decodeAudioFile } from '../audio/loadAudio.ts'
 import { runAnalysisInWorker } from '../audio/runAnalysis.ts'
+import type { SongPart } from './structure.ts'
 import { DIFFICULTIES, generateLaneLevel, type LaneNote, type LevelTrace } from './level.ts'
 
 /**
@@ -45,6 +46,7 @@ interface MapState {
   onsets: OnsetInfo[]
   /** Смены звука, найденные по спектру. */
   changes: number[]
+  parts: SongPart[]
 }
 
 const fileInput = document.querySelector<HTMLInputElement>('#file')!
@@ -67,7 +69,8 @@ for (const difficulty of DIFFICULTIES) {
 difficultySelect.value = 'hard'
 legend.innerHTML =
   FATES.map((fate) => `<span><i style="background:${fate.color}"></i>${fate.label}</span>`).join('') +
-  '<span><i style="background:#5ee6b8"></i>смена звука по спектру (метка над рядом судьбы)</span>'
+  '<span><i style="background:#5ee6b8"></i>смена звука по спектру (метка над рядом судьбы)</span>' +
+  '<span>полоса над дорожками: зелёная за ритмом, оранжевая за яркими звуками</span>'
 
 fileInput.addEventListener('change', () => {
   const file = fileInput.files?.[0]
@@ -113,7 +116,7 @@ async function loadTrack(file: File): Promise<void> {
 
 function buildLevel(analysis: AudioAnalysis): void {
   const difficulty = DIFFICULTIES.find((item) => item.id === difficultySelect.value) ?? DIFFICULTIES[2]
-  const trace: LevelTrace = { audible: [], changes: [], spaced: [], even: [], beforeLimit: [] }
+  const trace: LevelTrace = { audible: [], changes: [], spaced: [], even: [], parts: [], beforeLimit: [] }
   const notes = generateLaneLevel(analysis, difficulty, 'auto', trace)
 
   const audible = new Set(trace.audible)
@@ -135,7 +138,7 @@ function buildLevel(analysis: AudioAnalysis): void {
     onsets.push({ time, strength: analysis.onsetStrength[frame], fate })
   }
 
-  state = { analysis, notes, onsets, changes: trace.changes.map((frame) => frame / analysis.fps) }
+  state = { analysis, notes, onsets, changes: trace.changes.map((frame) => frame / analysis.fps), parts: trace.parts }
   showFunnel(state, trace)
   drawAll()
 }
@@ -222,7 +225,7 @@ function drawOverview({ analysis, notes, onsets }: MapState): void {
   ctx.strokeRect(toX(viewStart), 0.5, toX(span), height - 1)
 }
 
-function drawDetail({ analysis, notes, onsets, changes }: MapState): void {
+function drawDetail({ analysis, notes, onsets, changes, parts }: MapState): void {
   const ctx = prepare(detail)
   if (!ctx) return
   const width = detail.clientWidth
@@ -267,6 +270,12 @@ function drawDetail({ analysis, notes, onsets, changes }: MapState): void {
     ctx.moveTo(toX(time), strengthBottom - 16)
     ctx.lineTo(toX(time), strengthBottom - 2)
     ctx.stroke()
+  }
+
+  // Режим отрезка: зелёная полоса значит «идём за ритмом», оранжевая «за яркими звуками»
+  for (const part of parts) {
+    ctx.fillStyle = part.chain.length > 0 ? '#5ee6b8' : '#e0a030'
+    ctx.fillRect(toX(part.start), fatesBottom, toX(part.end) - toX(part.start) - 1, 5)
   }
 
   drawLanes(ctx, notes, fatesBottom, height, toX, inView)

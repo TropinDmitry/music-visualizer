@@ -1,16 +1,17 @@
 import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { beatWeight, pickNoteFrames } from '../game/level.ts'
 import {
-  findActivePulses,
   findMoments,
   findNoteChanges,
   findSections,
   findSoftPulses,
+  findSongParts,
   findSustains,
   songIntensity,
   splitAtBigChanges,
   withoutPulses,
   type Moment,
+  type SongPart,
   type Section,
 } from './structure.ts'
 
@@ -67,8 +68,10 @@ export interface Difficulty {
   floorGapSec: number
   /** Сколько нот максимум за любую секунду. */
   maxPerSecond: number
-  /** Рисунок внутри шага мягкого пульса: доли шага, на которых стоят ноты. */
+  /** Что звучит на каждом шаге ритма: доли шага, на которых ноты стоят всегда. */
   pulsePattern: number[]
+  /** Лесенки и лучи вместе с нотами: только там, где пальцы уже натренированы. */
+  isAdvanced: boolean
   /** Сколько стрелок максимум в серии. */
   arrowRun: number
   /** На протяжных звуках два луча сразу. */
@@ -77,29 +80,35 @@ export interface Difficulty {
 }
 
 export const DIFFICULTIES: Difficulty[] = [
-  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, pulsePattern: [0], arrowPeriodSec: 20, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
-  { id: 'normal', label: 'Средняя', minGapSec: 0.28, strengthShare: 0.8, pulsePattern: [0, 0.5], arrowPeriodSec: 12, pairEvery: 16, floorGapSec: 0.26, maxPerSecond: 4, arrowRun: 3, doubleHolds: false, canFail: true },
-  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.72, pulsePattern: [0, 0.5, 0.75], arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.14, maxPerSecond: 7, arrowRun: 4, doubleHolds: true, canFail: true },
+  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, pulsePattern: [0], isAdvanced: false, arrowPeriodSec: 20, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
+  { id: 'normal', label: 'Средняя', minGapSec: 0.28, strengthShare: 0.8, pulsePattern: [0, 0.5], isAdvanced: false, arrowPeriodSec: 12, pairEvery: 16, floorGapSec: 0.26, maxPerSecond: 4, arrowRun: 3, doubleHolds: false, canFail: true },
+  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.72, pulsePattern: [0, 0.5], isAdvanced: true, arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.14, maxPerSecond: 7, arrowRun: 4, doubleHolds: true, canFail: true },
 ]
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
 const STAR_EVERY = 17
 /** Короче этого луч теряет смысл. */
 const HOLD_MIN_SEC = 0.9
+const HOLD_MAX_SEC = 2.5
+/** Примерно через столько нот обычная нота становится нотой с лучом. */
+const HOLD_EVERY = 14
+/** Каждый такой луч на сложной сложности двойной. */
+const DOUBLE_HOLD_EVERY = 3
+const HOLD_END_GAP_SEC = 0.1
+const TRIPLE_WINDOW_SEC = 0.9
 /** Последние секунды разгона, где ноты идут чаще. */
 const BUILDUP_RUSH_SEC = 2.5
 const BUILDUP_RUSH_GAP = 0.6
 /** Узор «лесенка» на разгоне: рука бежит по дорожкам туда и обратно. */
-const STAIRS = [
-  [0, 1, 2, 1],
-  [2, 1, 0, 1],
-  [0, 2, 1, 2],
-  [2, 0, 1, 0],
-]
-const STAIRS_CHANGE_SEC = 10
-/** Шаг активной части делится на столько долей: на них встают и удары, и рисунок. */
-const ACTIVE_SLOTS = 4
-const ACTIVE_SHORT_STEP_SEC = 0.75
+const STAIRS = [0, 1, 2, 1]
+/** Шаг ритма делится на столько долей: на них встают и удары, и рисунок. */
+const STEP_SLOTS = 4
+/** В каждой такой фразе самый насыщенный шаг становится лесенкой. */
+const PHRASE_STEPS = 4
+/** Сколько настоящих ударов нужно в шаге, чтобы лесенка была под музыку. */
+const LADDER_MIN_HITS = 2
+/** Ноты дальше этого уже не одна лесенка. */
+const LADDER_MAX_GAP_SEC = 0.4
 /** Вокруг акцента оставляем воздух, чтобы он прозвучал отдельно. */
 const ACCENT_CLEAR_SEC = 0.2
 /** Выше этой силы песни часть нот становится парными. */
@@ -161,6 +170,8 @@ export interface LevelTrace {
   spaced: number[]
   /** Кадры, оставшиеся после проверки быстрых нот на ровность. */
   even: number[]
+  /** Отрезки песни и их режимы. */
+  parts: SongPart[]
   /** Все ноты до последнего предела плотности. */
   beforeLimit: LaneNote[]
 }
@@ -183,21 +194,22 @@ export function generateLaneLevel(
   const rawSustains = splitAtBigChanges(analysis, findSustains(analysis))
   const pulses = findSoftPulses(analysis, rawSustains)
   const sustains = withoutPulses(rawSustains, pulses)
-  const activeChains = focus === 'voice' ? [] : findActivePulses(analysis, intensity, sustains, pulses)
-  const frames = pickFramesWithMoments(analysis, difficulty, moments, focus, pulses, intensity, trace)
-  const patterned = addActivePattern(frames, activeChains, analysis.fps, difficulty.pulsePattern)
-  const regular = (time: number) => isInPulse(time, pulses) || activeChains.some((chain) => isInChain(time, chain))
-  const lanes = chooseLanes(analysis, patterned)
+  const parts = findSongParts(analysis, sustains, pulses)
+  const picked = pickFramesWithMoments(analysis, difficulty, moments, focus, intensity, trace)
+  const chains = focus === 'voice' ? [] : [...splitPulses(pulses), ...parts.map((part) => part.chain)]
+  const { frames, ladder } = arrangeRhythm(picked, chains, analysis.fps, difficulty)
+  const allowed = frames.filter((frame) => isAllowed(frame / analysis.fps, moments))
+  if (trace) trace.parts = parts
+  const ladderLanes = chooseLadderLanes(ladder, analysis.fps)
+  const lanes = chooseLanes(analysis, allowed)
 
   const notes: LaneNote[] = []
   let stairStep = 0
-  for (let i = 0; i < patterned.length; i++) {
-    const time = patterned[i] / analysis.fps
-    let lane = lanes[i]
-    if (isInRush(time, moments) || regular(time)) {
-      // Лесенка время от времени меняется, иначе длинный припев становится однообразным
-      const stairs = STAIRS[Math.floor(time / STAIRS_CHANGE_SEC) % STAIRS.length]
-      lane = stairs[stairStep % stairs.length]
+  for (let i = 0; i < allowed.length; i++) {
+    const time = allowed[i] / analysis.fps
+    let lane = ladderLanes.get(allowed[i]) ?? lanes[i]
+    if (isInRush(time, moments) && !ladderLanes.has(allowed[i])) {
+      lane = STAIRS[stairStep % STAIRS.length]
       stairStep += 1
     }
     const kind: NoteKind = (i + 1) % STAR_EVERY === 0 ? 'star' : 'tap'
@@ -207,9 +219,11 @@ export function generateLaneLevel(
   markLastNotesBeforePauses(notes, moments)
   const sections = findSections(analysis, intensity)
   const withArrows = placeArrowSeries(notes, difficulty, analysis, sustains)
-  const withPairs = addPairs(withArrows, difficulty, analysis, intensity)
+  const isLadder = (note: LaneNote) => ladderLanes.has(Math.round(note.time * analysis.fps))
+  const withPairs = addPairs(withArrows, difficulty, analysis, intensity, isLadder)
   const withSustains = addSustainHolds(withPairs, difficulty, sustains)
-  const withAccents = addAccents(withSustains, moments, sections, sustains)
+  const withHolds = addHolds(withSustains, difficulty, moments, isLadder)
+  const withAccents = addAccents(avoidTriples(withHolds, isLadder), moments, sections, sustains)
   if (trace) trace.beforeLimit = withAccents
   return limitDensity(withAccents, difficulty)
 }
@@ -323,6 +337,93 @@ function peakStrength(analysis: AudioAnalysis, from: number, to: number): number
   const last = Math.min(to, analysis.frameCount)
   for (let frame = Math.max(0, from); frame < last; frame++) peak = Math.max(peak, analysis.onsetStrength[frame])
   return peak
+}
+
+/**
+ * Обычная нота время от времени становится нотой с лучом. На сложной сложности
+ * остальные дорожки продолжают играть: держишь одну и нажимаешь другие.
+ * Лесенку луч не перекрывает, иначе из неё выпадут ступени.
+ */
+function addHolds(
+  notes: LaneNote[],
+  difficulty: Difficulty,
+  moments: Moment[],
+  isLadder: (note: LaneNote) => boolean,
+): LaneNote[] {
+  const result: LaneNote[] = []
+  const skipped = new Set<LaneNote>()
+  let notesSinceHold = 0
+  let holdCount = 0
+
+  for (let i = 0; i < notes.length; i++) {
+    const note = notes[i]
+    if (skipped.has(note)) continue
+    notesSinceHold += 1
+    const canHold = notesSinceHold >= HOLD_EVERY && note.kind === 'tap' && !isLadder(note) && !isInRush(note.time, moments)
+    const duration = canHold ? holdDuration(notes, i, moments, isLadder) : 0
+    if (duration < HOLD_MIN_SEC) {
+      result.push(note)
+      continue
+    }
+
+    holdCount += 1
+    notesSinceHold = 0
+    const isDouble = difficulty.doubleHolds && holdCount % DOUBLE_HOLD_EVERY === 0
+    const lanes = isDouble ? [note.lane, (note.lane + 1) % 3] : [note.lane]
+    for (const lane of lanes) result.push({ ...note, lane, kind: 'hold', duration })
+
+    // На простых сложностях рука одна: пока держишь луч, других нот нет
+    for (let j = i + 1; j < notes.length && notes[j].time < note.time + duration; j++) {
+      const isOnHeldLane = lanes.includes(notes[j].lane) && notes[j].kind !== 'swipe'
+      if (isOnHeldLane || !difficulty.isAdvanced) skipped.add(notes[j])
+    }
+  }
+  return result
+}
+
+/** Третья нота подряд на той же дорожке скучна, сдвигаем её на свободную. */
+function avoidTriples(notes: LaneNote[], isLadder: (note: LaneNote) => boolean): LaneNote[] {
+  const result = notes.map((note) => ({ ...note }))
+  for (let i = 2; i < result.length; i++) {
+    const note = result[i]
+    if (note.kind !== 'tap' && note.kind !== 'star') continue
+    if (isLadder(note) || result[i - 1].lane !== note.lane || result[i - 2].lane !== note.lane) continue
+    if (note.time - result[i - 2].time >= TRIPLE_WINDOW_SEC) continue
+    for (const lane of [(note.lane + 1) % 3, (note.lane + 2) % 3]) {
+      if (!isLaneHeld(result, i, lane)) {
+        note.lane = lane
+        break
+      }
+    }
+  }
+  return result
+}
+
+/** Идёт ли по дорожке луч в момент этой ноты. */
+function isLaneHeld(notes: LaneNote[], index: number, lane: number): boolean {
+  const time = notes[index].time
+  for (let i = index - 1; i >= 0 && time - notes[i].time < SUSTAIN_HOLD_MAX_SEC; i--) {
+    const isHold = notes[i].kind === 'hold' && notes[i].lane === lane
+    if (isHold && notes[i].time + (notes[i].duration ?? 0) > time) return true
+  }
+  return false
+}
+
+/** Сколько можно держать: до ближайшей подходящей ноты, не заходя на лесенку и паузу. */
+function holdDuration(
+  notes: LaneNote[],
+  start: number,
+  moments: Moment[],
+  isLadder: (note: LaneNote) => boolean,
+): number {
+  let end = notes[start].time + HOLD_MAX_SEC
+  for (let j = start + 1; j < notes.length && notes[j].time < end; j++) {
+    if (isLadder(notes[j]) || notes[j].kind === 'hold') end = notes[j].time - HOLD_END_GAP_SEC
+  }
+  for (const moment of moments) {
+    if (moment.kind === 'pause' && moment.start > notes[start].time && moment.start < end) end = moment.start
+  }
+  return end - notes[start].time
 }
 
 /**
@@ -487,69 +588,110 @@ function hasOnsetNear(analysis: AudioAnalysis, frame: number): boolean {
   return false
 }
 
-/**
- * На мягком пульсе случайные ноты выглядят хаосом, поэтому весь отрезок заменяется
- * ровным рисунком на шаге пульса: рука чувствует ритм, даже если ударов почти не слышно.
- */
-function addPulsePattern(frames: number[], pulses: number[], fps: number, pattern: number[]): void {
-  if (pulses.length === 0) return
-  const kept = frames.filter((frame) => !isInPulse(frame / fps, pulses))
-  frames.length = 0
-  frames.push(...kept)
-  for (let i = 0; i + 1 < pulses.length; i++) {
-    const step = pulses[i + 1] - pulses[i]
-    if (step > PULSE_MAX_STEP_SEC) continue
-    for (const share of pattern) frames.push(Math.round((pulses[i] + step * share) * fps))
+/** Мягкий пульс лежит одним списком: разрезаем его на отдельные цепочки. */
+function splitPulses(pulses: number[]): number[][] {
+  const chains: number[][] = []
+  let chain: number[] = []
+  for (const time of pulses) {
+    if (chain.length > 0 && time - chain[chain.length - 1] > PULSE_MAX_STEP_SEC) {
+      chains.push(chain)
+      chain = []
+    }
+    chain.push(time)
   }
-  frames.sort((a, b) => a - b)
+  if (chain.length > 0) chains.push(chain)
+  return chains
 }
 
 /**
- * В активной части рисунок складывается из самой музыки: удар встаёт на ближайшую
- * долю шага, а пустые доли заполняются рисунком сложности. Так ноты ровные, но
- * не одинаковые: где музыка дробит шаг, там и нот больше.
+ * Там, где ритм выражен, ноты встают на доли шага. Рисунок идёт от самой музыки:
+ * редкий шаг остаётся редким, а самый насыщенный шаг фразы становится лесенкой.
+ * Вне цепочек ноты не трогаем: там они идут за яркими звуками и словами.
  */
-function addActivePattern(frames: number[], chains: number[][], fps: number, pattern: number[]): number[] {
-  let result = [...frames]
+function arrangeRhythm(
+  picked: number[],
+  chains: number[][],
+  fps: number,
+  difficulty: Difficulty,
+): { frames: number[]; ladder: number[] } {
+  let frames = [...picked]
+  const ladder: number[] = []
+
   for (const chain of chains) {
+    if (chain.length < 2) continue
+    const steps: Set<number>[] = []
     for (let i = 0; i + 1 < chain.length; i++) {
-      const start = chain[i]
-      const step = chain[i + 1] - start
-      // На коротком шаге четыре доли дали бы пять нажатий в секунду всю песню подряд
-      const slotCount = step < ACTIVE_SHORT_STEP_SEC ? 2 : ACTIVE_SLOTS
-      const slotSec = step / slotCount
+      const slotSec = (chain[i + 1] - chain[i]) / STEP_SLOTS
       const slots = new Set<number>()
-      for (const share of pattern) {
-        const slot = Math.round(share * slotCount)
-        if (slot < slotCount) slots.add(slot)
+      for (const frame of frames) {
+        const slot = Math.round((frame / fps - chain[i]) / slotSec)
+        if (slot >= 0 && slot < STEP_SLOTS) slots.add(slot)
       }
-      for (const frame of result) {
-        const slot = Math.round((frame / fps - start) / slotSec)
-        if (slot >= 0 && slot < slotCount) slots.add(slot)
+      steps.push(slots)
+    }
+
+    const first = chain[0] - PULSE_EDGE_SEC
+    const last = chain[chain.length - 1]
+    frames = frames.filter((frame) => frame / fps < first || frame / fps >= last)
+
+    const ladderSteps = difficulty.isAdvanced ? chooseLadderSteps(steps) : new Set<number>()
+    for (let i = 0; i < steps.length; i++) {
+      const slotSec = (chain[i + 1] - chain[i]) / STEP_SLOTS
+      const toFrame = (slot: number) => Math.round((chain[i] + slot * slotSec) * fps)
+      if (ladderSteps.has(i)) {
+        for (let slot = 0; slot < STEP_SLOTS; slot++) ladder.push(toFrame(slot))
+        // Если музыка не кончилась, лесенка тянется до шести нот
+        const isLong = i + 1 < steps.length && steps[i + 1].size >= LADDER_MIN_HITS
+        if (isLong && !ladderSteps.has(i + 1)) ladder.push(toFrame(STEP_SLOTS), toFrame(STEP_SLOTS + 1))
+        continue
       }
-      // Слоты уже посчитаны, поэтому старые ноты шага заменяем новыми
-      result = result.filter((frame) => {
-        const slot = Math.round((frame / fps - start) / slotSec)
-        return slot < 0 || slot >= slotCount
-      })
-      for (const slot of slots) result.push(Math.round((start + slot * slotSec) * fps))
+      for (const slot of chooseSlots(steps[i], difficulty)) frames.push(toFrame(slot))
     }
   }
-  result.sort((a, b) => a - b)
-  return result
+
+  frames.push(...ladder)
+  const unique = [...new Set(frames)]
+  unique.sort((a, b) => a - b)
+  return { frames: unique, ladder }
 }
 
-function isInChain(time: number, chain: number[]): boolean {
-  return time >= chain[0] && time <= chain[chain.length - 1]
-}
-
-/** Время внутри одного из отрезков с пульсом. Между отрезками шаг заведомо длиннее. */
-function isInPulse(time: number, pulses: number[]): boolean {
-  for (let i = 0; i + 1 < pulses.length; i++) {
-    const step = pulses[i + 1] - pulses[i]
-    if (step <= PULSE_MAX_STEP_SEC && time >= pulses[i] - PULSE_EDGE_SEC && time <= pulses[i + 1]) return true
+/** В каждой фразе лесенкой становится шаг, где музыка сама звучит чаще всего. */
+function chooseLadderSteps(steps: Set<number>[]): Set<number> {
+  const chosen = new Set<number>()
+  for (let start = 0; start < steps.length; start += PHRASE_STEPS) {
+    let best = -1
+    for (let i = start; i < Math.min(start + PHRASE_STEPS, steps.length); i++) {
+      if (steps[i].size >= LADDER_MIN_HITS && (best === -1 || steps[i].size >= steps[best].size)) best = i
+    }
+    if (best !== -1) chosen.add(best)
   }
-  return false
+  return chosen
+}
+
+/** Обычный шаг: настоящие удары плюс опорные доли, чтобы рука не теряла ритм. */
+function chooseSlots(real: Set<number>, difficulty: Difficulty): Set<number> {
+  const slots = new Set(real)
+  for (const share of difficulty.pulsePattern) slots.add(Math.round(share * STEP_SLOTS))
+  return slots
+}
+
+/** Лесенка бежит по дорожкам по очереди, каждая следующая в другую сторону. */
+function chooseLadderLanes(ladder: number[], fps: number): Map<number, number> {
+  const sorted = [...new Set(ladder)].sort((a, b) => a - b)
+  const lanes = new Map<number, number>()
+  let index = 0
+  let direction = 1
+  for (let i = 0; i < sorted.length; i++) {
+    const isNew = i > 0 && (sorted[i] - sorted[i - 1]) / fps > LADDER_MAX_GAP_SEC
+    if (isNew) {
+      index = 0
+      direction = -direction
+    }
+    const lane = STAIRS[index % STAIRS.length]
+    lanes.set(sorted[i], direction > 0 ? lane : 2 - lane)
+    index += 1
+  }
+  return lanes
 }
 
 /** Оставляет удары, близкие по силе к самому сильному в окрестности. */
@@ -598,6 +740,7 @@ function addPairs(
   difficulty: Difficulty,
   analysis: AudioAnalysis,
   intensity: Float32Array,
+  isLadder: (note: LaneNote) => boolean,
 ): LaneNote[] {
   if (difficulty.pairEvery === 0) return notes
   const result: LaneNote[] = []
@@ -605,7 +748,7 @@ function addPairs(
   for (const note of notes) {
     const frame = Math.min(Math.round(note.time * analysis.fps), intensity.length - 1)
     if (intensity[frame] >= INTENSE_LEVEL) notesSincePair += 1
-    if (note.kind === 'tap' && notesSincePair >= difficulty.pairEvery) {
+    if (note.kind === 'tap' && notesSincePair >= difficulty.pairEvery && !isLadder(note)) {
       notesSincePair = 0
       result.push({ ...note, kind: 'accent' })
       result.push({ ...note, kind: 'accent', lane: (note.lane + 1 + (result.length % 2)) % 3 })
@@ -622,12 +765,10 @@ function pickFramesWithMoments(
   difficulty: Difficulty,
   moments: Moment[],
   focus: NoteFocus,
-  pulses: number[],
   intensity: Float32Array,
   trace?: LevelTrace,
 ): number[] {
   const picked = pickRhythmFrames(analysis, difficulty, focus, intensity, trace)
-  addPulsePattern(picked, pulses, analysis.fps, difficulty.pulsePattern)
   const rushCandidates = pickNoteFrames(analysis, difficulty.minGapSec * BUILDUP_RUSH_GAP)
 
   const frames: number[] = []
