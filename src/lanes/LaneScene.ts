@@ -29,8 +29,8 @@ const LOOK_NUMBERS: Record<ClipLook, number> = { outline: 0, duotone: 1, comic: 
  */
 const TRACK_COLOR = '#2fd8cf'
 const LANE_COLORS = [TRACK_COLOR, TRACK_COLOR, TRACK_COLOR]
-const TAP_COLOR = '#ffb52e'
-const SPECIAL_COLOR = '#ff6fa8'
+const TAP_COLOR = '#b84dff'
+const SPECIAL_COLOR = '#ffc933'
 const LANE_KEYS = ['A', 'S', 'D']
 /** Цвет дорожек на множителях ×1…×4: игра явно меняется, пока серия растёт. */
 const TIER_COLORS = ['#3dff9e', '#2ef2d0', '#9dffc4', '#d9fff0']
@@ -283,7 +283,7 @@ const fanFragment = /* glsl */ `
       float width = 0.2 + 0.05 * sin(distanceAway * 9.0 - uTrackTime * 12.0) * uBeamHeld[i];
       float core = 1.0 - smoothstep(width * 0.3, width, fromCenter);
       // Луч того же цвета, что и обычная нота: это продолжение ноты, а не дорожка
-      vec3 beamColor = mix(vec3(1.0, 0.71, 0.18), vec3(1.0), 0.15 + 0.45 * uBeamHeld[i]);
+      vec3 beamColor = mix(vec3(0.72, 0.3, 1.0), vec3(1.0), 0.1 + 0.45 * uBeamHeld[i]);
       color = mix(color, beamColor, core);
       alpha = max(alpha, core * (0.75 + 0.25 * uBeamHeld[i]));
     }
@@ -306,6 +306,8 @@ const noteVertex = /* glsl */ `
   uniform vec3 uColor;
   varying vec3 vColor;
   varying vec3 vNormal;
+  varying vec3 vWorld;
+  varying float vRadius;
 
   void main() {
     #ifdef USE_INSTANCING
@@ -319,14 +321,21 @@ const noteVertex = /* glsl */ `
       vColor = uColor;
     #endif
     vNormal = normalize(mat3(toWorld) * normal);
-    gl_Position = projectionMatrix * viewMatrix * toWorld * vec4(position, 1.0);
+    vRadius = length(position.xz);
+    vec4 world = toWorld * vec4(position, 1.0);
+    vWorld = world.xyz;
+    gl_Position = projectionMatrix * viewMatrix * world;
   }
 `
 
 const noteFragment = /* glsl */ `
   uniform float uOpacity;
+  uniform float uShimmer;
+  uniform float uTime;
   varying vec3 vColor;
   varying vec3 vNormal;
+  varying vec3 vWorld;
+  varying float vRadius;
 
   void main() {
     vec3 normal = normalize(vNormal);
@@ -334,14 +343,33 @@ const noteFragment = /* glsl */ `
     float light = max(dot(normal, lightDirection), 0.0);
     float shine = pow(light, 30.0);
     float rim = pow(1.0 - max(normal.z, 0.0), 3.0);
-    vec3 color = vColor * (0.32 + 0.85 * light) + vec3(1.0) * shine * 0.7 + vColor * rim * 0.4;
+    vec3 base = vColor;
+
+    // Перелив: цвет зависит от наклона поверхности и времени, как у перламутра.
+    // Оттенок гуляет только в пурпурной гамме, поэтому нота остаётся узнаваемой.
+    if (uShimmer > 0.5) {
+      float wave = 0.5 + 0.5 * sin(dot(normal, vec3(2.4, 3.2, 1.6)) + vWorld.x * 4.0 + vWorld.y * 3.0 + uTime * 2.2);
+      base = mix(vec3(0.5, 0.2, 1.0), vec3(1.0, 0.32, 0.9), wave);
+      base = mix(base, vec3(0.35, 0.65, 1.0), smoothstep(0.82, 1.0, wave) * 0.45);
+    }
+
+    vec3 color = base * (0.32 + 0.85 * light) + vec3(1.0) * shine * 0.7 + base * rim * 0.4;
+
+    // Затенение в лунке: чем ближе к центру, тем глубже и темнее
+    if (uShimmer > 0.5) color *= 0.42 + 0.58 * smoothstep(0.02, 0.36, vRadius);
+
     gl_FragColor = vec4(color, uOpacity);
   }
 `
 
-function createNoteMaterial(color: string, useDepth = true): THREE.ShaderMaterial {
+function createNoteMaterial(color: string, useDepth = true, shimmer = false): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
-    uniforms: { uColor: { value: colorVector(color) }, uOpacity: { value: 1 } },
+    uniforms: {
+      uColor: { value: colorVector(color) },
+      uOpacity: { value: 1 },
+      uShimmer: { value: shimmer ? 1 : 0 },
+      uTime: { value: 0 },
+    },
     vertexShader: noteVertex,
     fragmentShader: noteFragment,
     // Прозрачный список рисуется по renderOrder, поэтому ноты лягут поверх дорожек
@@ -363,6 +391,44 @@ function extrudeFlat(shape: THREE.Shape, thickness: number): THREE.BufferGeometr
   geometry.translate(0, 0, -thickness / 2)
   geometry.rotateX(-Math.PI / 2)
   return geometry
+}
+
+/**
+ * Круг с лункой: профиль от центра к краю вращается вокруг оси. Центр ниже
+ * края, поэтому нота выглядит вогнутой, как тарелка, а свет ложится по кромке.
+ */
+function createDishedCoinGeometry(): THREE.LatheGeometry {
+  const profile = [
+    new THREE.Vector2(0, 0.015),
+    new THREE.Vector2(0.14, 0.02),
+    new THREE.Vector2(0.28, 0.05),
+    new THREE.Vector2(0.38, 0.1),
+    new THREE.Vector2(0.45, 0.125),
+    new THREE.Vector2(0.495, 0.1),
+    new THREE.Vector2(0.5, 0.05),
+    new THREE.Vector2(0.5, -0.1),
+    new THREE.Vector2(0, -0.1),
+  ]
+  return new THREE.LatheGeometry(profile.reverse(), 48)
+}
+
+/** Мягкое пятно света для ореола вокруг ноты. */
+function createHaloTexture(): THREE.CanvasTexture {
+  const size = 96
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    const gradient = ctx.createRadialGradient(size / 2, size / 2, size * 0.2, size / 2, size / 2, size / 2)
+    gradient.addColorStop(0, 'rgba(255,255,255,0.6)')
+    gradient.addColorStop(1, 'rgba(255,255,255,0)')
+    ctx.fillStyle = gradient
+    ctx.fillRect(0, 0, size, size)
+  }
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.NoColorSpace
+  return texture
 }
 
 function createArrowGeometry(): THREE.BufferGeometry {
@@ -497,6 +563,8 @@ export class LaneScene {
     uBeamHeld: { value: new Array(MAX_BEAMS).fill(0) },
   }
   private readonly tapNotes: THREE.InstancedMesh
+  private readonly plainCoins: THREE.InstancedMesh
+  private readonly noteHalos: THREE.InstancedMesh
   private readonly swipeNotes: THREE.InstancedMesh
   private readonly starNotes: THREE.InstancedMesh
   private readonly noteShadows: THREE.InstancedMesh
@@ -531,7 +599,12 @@ export class LaneScene {
     // Круг — низкий цилиндр, поэтому у него виден и верх, и бок
     const coinGeometry = new THREE.CylinderGeometry(0.5, 0.5, 0.2, 40)
     const arrowGeometry = createArrowGeometry()
-    this.tapNotes = new THREE.InstancedMesh(coinGeometry, createNoteMaterial('#ffffff'), MAX_NOTES)
+    this.tapNotes = new THREE.InstancedMesh(
+      createDishedCoinGeometry(),
+      createNoteMaterial('#ffffff', true, true),
+      MAX_NOTES,
+    )
+    this.plainCoins = new THREE.InstancedMesh(coinGeometry, createNoteMaterial('#ffffff'), MAX_NOTES)
     this.swipeNotes = new THREE.InstancedMesh(arrowGeometry, createNoteMaterial('#ffffff'), MAX_NOTES)
     this.starNotes = new THREE.InstancedMesh(createStarGeometry(), createNoteMaterial('#ffffff'), MAX_NOTES)
 
@@ -546,7 +619,25 @@ export class LaneScene {
     this.noteShadows.count = 0
     this.scene.add(this.noteShadows)
 
-    for (const mesh of [this.tapNotes, this.swipeNotes, this.starNotes]) {
+    // Лёгкое свечение под нотой: складывается со светом сцены и не перекрывает её
+    this.noteHalos = new THREE.InstancedMesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({
+        map: createHaloTexture(),
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+      MAX_NOTES,
+    )
+    this.noteHalos.frustumCulled = false
+    this.noteHalos.renderOrder = 2.6
+    this.noteHalos.count = 0
+    for (let i = 0; i < MAX_NOTES; i++) this.noteHalos.setColorAt(i, this.color.set(TAP_COLOR))
+    this.scene.add(this.noteHalos)
+
+    for (const mesh of [this.tapNotes, this.plainCoins, this.swipeNotes, this.starNotes]) {
       mesh.frustumCulled = false
       mesh.renderOrder = 3
       // Без начального вызова setColorAt буфер цветов появится слишком поздно
@@ -847,6 +938,8 @@ export class LaneScene {
     approachSec: number,
   ): void {
     let tapCount = 0
+    let plainCount = 0
+    let haloCount = 0
     let swipeCount = 0
     let starCount = 0
     let shadowCount = 0
@@ -873,6 +966,18 @@ export class LaneScene {
       this.noteShadows.setMatrixAt(shadowCount, this.helper.matrix)
       shadowCount += 1
 
+      // Ореол только у круглых цветных нот: стрелка читается и без него
+      if (note.kind !== 'swipe') {
+        this.helper.position.set(x, y, 0)
+        this.helper.rotation.set(0, 0, 0)
+        this.helper.scale.set(size * 1.7, size * 1.7 * PLANE_SQUASH, 1)
+        this.helper.updateMatrix()
+        this.noteHalos.setMatrixAt(haloCount, this.helper.matrix)
+        const isGolden = note.kind === 'star' || note.kind === 'accent'
+        this.noteHalos.setColorAt(haloCount, this.color.set(isGolden ? SPECIAL_COLOR : TAP_COLOR))
+        haloCount += 1
+      }
+
       const spin = note.kind === 'star' ? time * 3 : 0
       this.helper.position.set(x, y, 0)
       this.helper.rotation.set(NOTE_TILT, spin, 0)
@@ -884,12 +989,18 @@ export class LaneScene {
         this.starNotes.setColorAt(starCount, this.color.set(SPECIAL_COLOR))
         starCount += 1
       } else {
-        let coinColor = TAP_COLOR
-        if (note.kind === 'swipe') coinColor = COIN_WITH_ARROW_COLOR
-        if (note.kind === 'accent') coinColor = SPECIAL_COLOR
-        this.tapNotes.setMatrixAt(tapCount, this.helper.matrix)
-        this.tapNotes.setColorAt(tapCount, this.color.set(coinColor))
-        tapCount += 1
+        const isPlain = note.kind === 'swipe' || note.kind === 'accent'
+        if (isPlain) {
+          const coinColor = note.kind === 'swipe' ? COIN_WITH_ARROW_COLOR : SPECIAL_COLOR
+          this.plainCoins.setMatrixAt(plainCount, this.helper.matrix)
+          this.plainCoins.setColorAt(plainCount, this.color.set(coinColor))
+          plainCount += 1
+        } else {
+          // Цвет такой ноты задаёт перелив в шейдере
+          this.tapNotes.setMatrixAt(tapCount, this.helper.matrix)
+          this.tapNotes.setColorAt(tapCount, this.color.set(TAP_COLOR))
+          tapCount += 1
+        }
       }
 
       if (note.kind === 'swipe') {
@@ -907,11 +1018,16 @@ export class LaneScene {
     }
 
     this.tapNotes.count = tapCount
+    this.plainCoins.count = plainCount
+    this.noteHalos.count = haloCount
+    this.noteHalos.instanceMatrix.needsUpdate = true
+    if (this.noteHalos.instanceColor) this.noteHalos.instanceColor.needsUpdate = true
+    ;(this.tapNotes.material as THREE.ShaderMaterial).uniforms.uTime.value = time
     this.swipeNotes.count = swipeCount
     this.starNotes.count = starCount
     this.noteShadows.count = shadowCount
     this.noteShadows.instanceMatrix.needsUpdate = true
-    for (const mesh of [this.tapNotes, this.swipeNotes, this.starNotes]) {
+    for (const mesh of [this.tapNotes, this.plainCoins, this.swipeNotes, this.starNotes]) {
       mesh.instanceMatrix.needsUpdate = true
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
     }
