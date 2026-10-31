@@ -30,6 +30,8 @@ const LOOK_NUMBERS: Record<ClipLook, number> = { outline: 0, duotone: 1, comic: 
 const TRACK_COLOR = '#2fd8cf'
 const LANE_COLORS = [TRACK_COLOR, TRACK_COLOR, TRACK_COLOR]
 const TAP_COLOR = '#b84dff'
+/** Тёмный металл корпуса: блики на нём рисует свет сцены. */
+const PLATFORM_METAL_COLOR = '#55615f'
 const SPECIAL_COLOR = '#ffc933'
 const LANE_KEYS = ['A', 'S', 'D']
 /** Цвет дорожек на множителях ×1…×4: игра явно меняется, пока серия растёт. */
@@ -417,26 +419,71 @@ function extrudeFlat(shape: THREE.Shape, thickness: number): THREE.BufferGeometr
  * края, поэтому нота выглядит вогнутой, как тарелка, а свет ложится по кромке.
  */
 /**
- * Шестигранная платформа: низкое основание, скошенный борт и утопленная площадка.
- * Шесть граней вместо круга дают чёткие блики, а отдельные нормали на гранях
- * делают рёбра резкими, как у металлической детали.
+ * Корпус круглой платформы: профиль от центра к краю вращается вокруг оси.
+ * Несколько ступеней и скосов ловят свет, поэтому корпус выглядит точёной
+ * металлической деталью, а не плоским кольцом.
  */
 function createPlatformGeometry(): THREE.BufferGeometry {
   const profile = [
-    new THREE.Vector2(0, 0.05),
-    new THREE.Vector2(0.14, 0.05),
-    new THREE.Vector2(0.155, 0.085),
-    new THREE.Vector2(0.19, 0.085),
-    new THREE.Vector2(0.235, 0.035),
-    new THREE.Vector2(0.235, -0.04),
-    new THREE.Vector2(0, -0.04),
+    new THREE.Vector2(0, 0.03),
+    new THREE.Vector2(0.15, 0.03),
+    new THREE.Vector2(0.158, 0.05),
+    new THREE.Vector2(0.178, 0.085),
+    new THREE.Vector2(0.2, 0.09),
+    new THREE.Vector2(0.212, 0.075),
+    new THREE.Vector2(0.222, 0.055),
+    new THREE.Vector2(0.24, 0.05),
+    new THREE.Vector2(0.255, 0.02),
+    new THREE.Vector2(0.26, -0.05),
+    new THREE.Vector2(0, -0.05),
   ]
-  const geometry = new THREE.LatheGeometry(profile.reverse(), 6).toNonIndexed()
-  geometry.computeVertexNormals()
-  // Поворот на 30 градусов ставит шестигранник острым углом вбок, а не вверх
-  geometry.rotateY(Math.PI / 6)
+  const geometry = new THREE.LatheGeometry(profile.reverse(), 72)
   geometry.rotateX(Math.PI / 2)
   return geometry
+}
+
+/** Лицевая панель кнопки: глубина к центру, тонкие круги и насечки по краю. */
+function createPlatformFaceTexture(): THREE.CanvasTexture {
+  const size = 256
+  const center = size / 2
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    const depth = ctx.createRadialGradient(center, center * 0.8, 10, center, center, center)
+    depth.addColorStop(0, '#5a6a68')
+    depth.addColorStop(0.55, '#26302f')
+    depth.addColorStop(1, '#0c1211')
+    ctx.fillStyle = depth
+    ctx.beginPath()
+    ctx.arc(center, center, center - 1, 0, Math.PI * 2)
+    ctx.fill()
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)'
+    ctx.lineWidth = 2
+    for (const radius of [0.5, 0.72]) {
+      ctx.beginPath()
+      ctx.arc(center, center, center * radius, 0, Math.PI * 2)
+      ctx.stroke()
+    }
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)'
+    ctx.lineWidth = 3
+    const ticks = 48
+    for (let i = 0; i < ticks; i++) {
+      const angle = (i / ticks) * Math.PI * 2
+      const inner = center * (i % 4 === 0 ? 0.82 : 0.87)
+      const outer = center * 0.93
+      ctx.beginPath()
+      ctx.moveTo(center + Math.cos(angle) * inner, center + Math.sin(angle) * inner)
+      ctx.lineTo(center + Math.cos(angle) * outer, center + Math.sin(angle) * outer)
+      ctx.stroke()
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.NoColorSpace
+  return texture
 }
 
 function createDishedCoinGeometry(): THREE.LatheGeometry {
@@ -660,6 +707,7 @@ export class LaneScene {
   /** Текущий цвет дорожек и колец: плавно идёт к цвету новой части песни. */
   private readonly trackColor = colorVector(TRACK_COLOR)
   private readonly ringColors: THREE.Vector3[] = []
+  private readonly lightMaterials: THREE.MeshBasicMaterial[] = []
   private readonly tapNotes: THREE.InstancedMesh
   private readonly plainCoins: THREE.InstancedMesh
   private readonly noteHalos: THREE.InstancedMesh
@@ -837,34 +885,51 @@ export class LaneScene {
   }
 
   /**
-   * Кнопка внизу дорожки: объёмная шестигранная платформа, светящаяся середина и
-   * буква клавиши. Вся группа наклонена так же, как ноты, поэтому лежит в той
-   * же плоскости.
+   * Кнопка внизу дорожки: круглый металлический корпус, неоновая вставка,
+   * лицевая панель с насечками, свет внутри и буква клавиши. Вся группа наклонена
+   * так же, как ноты, поэтому лежит в той же плоскости.
    */
   private createTarget(lane: number): Target {
     const group = new THREE.Group()
     group.position.y = HIT_Y
     group.rotation.x = NOTE_TILT - Math.PI / 2
 
+    const body = new THREE.Mesh(createPlatformGeometry(), createNoteMaterial(PLATFORM_METAL_COLOR))
+
+    const neonMaterial = createNoteMaterial(LANE_COLORS[lane], false)
+    this.ringColors.push(neonMaterial.uniforms.uColor.value)
+    const neon = new THREE.Mesh(new THREE.TorusGeometry(0.185, 0.011, 12, 96), neonMaterial)
+    neon.position.z = 0.09
+
+    const faceMaterial = new THREE.MeshBasicMaterial({
+      map: createPlatformFaceTexture(),
+      transparent: true,
+      depthTest: false,
+    })
+    const face = new THREE.Mesh(new THREE.CircleGeometry(0.152, 64), faceMaterial)
+    face.position.z = 0.032
+
     const light = new THREE.MeshBasicMaterial({
       color: LANE_COLORS[lane],
+      map: createHaloTexture(),
       transparent: true,
       opacity: 0.16,
       depthTest: false,
       depthWrite: false,
+      blending: THREE.AdditiveBlending,
     })
-    const glow = new THREE.Mesh(new THREE.CircleGeometry(0.15, 6, Math.PI / 6), light)
+    this.lightMaterials.push(light)
+    const glow = new THREE.Mesh(new THREE.PlaneGeometry(0.42, 0.42), light)
     glow.position.z = 0.06
-    const ringMaterial = createNoteMaterial(LANE_COLORS[lane])
-    this.ringColors.push(ringMaterial.uniforms.uColor.value)
-    const ring = new THREE.Mesh(createPlatformGeometry(), ringMaterial)
+
     const label = new THREE.Mesh(
       new THREE.PlaneGeometry(0.15, 0.15),
       new THREE.MeshBasicMaterial({ map: createKeyTexture(LANE_KEYS[lane]), transparent: true, depthTest: false }),
     )
     label.position.z = 0.07
+
     let order = 2
-    for (const mesh of [ring, glow, label]) {
+    for (const mesh of [body, face, glow, neon, label]) {
       mesh.renderOrder = order
       order += 0.1
       group.add(mesh)
@@ -914,6 +979,9 @@ export class LaneScene {
     this.trackColor.lerp(colorVector(hex), 0.04)
     for (const color of this.fanUniforms.uLaneColors.value) color.copy(this.trackColor)
     for (const color of this.ringColors) color.copy(this.trackColor)
+    for (const material of this.lightMaterials) {
+      material.color.setRGB(this.trackColor.x, this.trackColor.y, this.trackColor.z, THREE.LinearSRGBColorSpace)
+    }
   }
 
   /** Сила серии 0..1 и суперрежим. Меняются плавно, чтобы награда разгоралась и гасла. */
