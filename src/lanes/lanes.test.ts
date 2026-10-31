@@ -50,7 +50,10 @@ describe('generateLaneLevel', () => {
         const hasBreak = three.some((note) => note.kind === 'accent' || note.kind === 'space' || note.kind === 'hold' || note.kind === 'swipe')
         const isContinuous = notes[i].time - notes[i - 2].time < 0.9
         const sameLane = three.every((note) => note.lane === notes[i].lane)
-        expect(!hasBreak && isContinuous && sameLane).toBe(false)
+        // Под двойным лучом свободна одна дорожка, и ноты идут только по ней
+        const time = notes[i].time
+        const isUnderBeam = notes.some((note) => note.kind === 'hold' && note.time <= time && note.time + (note.duration ?? 0) > time)
+        expect(!hasBreak && !isUnderBeam && isContinuous && sameLane).toBe(false)
       }
     }
   })
