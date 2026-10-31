@@ -1,6 +1,16 @@
 import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { beatWeight, pickNoteFrames } from '../game/level.ts'
-import { findBeatGrid, findMoments, hasRhythm, snapToGrid, songIntensity, type BeatGrid, type Moment } from './structure.ts'
+import {
+  findBeatGrid,
+  findMoments,
+  findSections,
+  hasRhythm,
+  snapToGrid,
+  songIntensity,
+  type BeatGrid,
+  type Moment,
+  type Section,
+} from './structure.ts'
 
 /**
  * Уровень для трёх дорожек. Дорожка выбирается по высоте звука: низкие удары
@@ -45,17 +55,17 @@ export interface Difficulty {
   id: DifficultyId
   label: string
   minGapSec: number
-  /** Каждое какое подходящее место в спокойной части становится стрелкой. */
-  arrowEvery: number
+  /** Примерно раз в столько секунд появляется стрелка. */
+  arrowPeriodSec: number
   /** В сильных частях песни каждая какая нота становится парной. 0 — парных нет. */
   pairEvery: number
   canFail: boolean
 }
 
 export const DIFFICULTIES: Difficulty[] = [
-  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, arrowEvery: 3, pairEvery: 0, canFail: false },
-  { id: 'normal', label: 'Средняя', minGapSec: 0.3, arrowEvery: 2, pairEvery: 11, canFail: true },
-  { id: 'hard', label: 'Сложная', minGapSec: 0.18, arrowEvery: 2, pairEvery: 7, canFail: true },
+  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, arrowPeriodSec: 14, pairEvery: 0, canFail: false },
+  { id: 'normal', label: 'Средняя', minGapSec: 0.3, arrowPeriodSec: 10, pairEvery: 16, canFail: true },
+  { id: 'hard', label: 'Сложная', minGapSec: 0.18, arrowPeriodSec: 7, pairEvery: 11, canFail: true },
 ]
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
@@ -88,10 +98,16 @@ const OFF_GRID_PENALTY = 0.45
 const GRID_TOLERANCE_FRAMES = 5
 const LEAD_IN_SEC = 1.5
 const TAIL_FRAMES = 15
-/** Стрелки только в спокойных местах: в сильной части руке и без них хватает работы. */
-const ARROW_MAX_INTENSITY = 0.45
-/** Свободное время вокруг стрелки, чтобы успеть перенести руку на другие клавиши. */
-const ARROW_CLEAR_SEC = 0.55
+/** Вокруг стрелки игра сама освобождает место: руке нужно время перейти на другие клавиши. */
+const ARROW_CLEAR_SEC = 0.45
+/** Выделяющийся удар важнее обычного, даже если стоит чуть вне сетки. */
+const PROMINENT_BONUS = 1.2
+const PROMINENCE_WINDOW_SEC = 1.5
+/** Парные ноты на смене ритма не чаще этого: иначе акценты теряют вес. */
+const MIN_ACCENT_GAP_SEC = 12
+/** Смену части ищем рядом с найденным событием, чтобы попасть в реальный удар. */
+const SECTION_SNAP_SEC = 1.5
+const LONG_PAUSE_SEC = 0.55
 
 export function findDifficulty(id: DifficultyId): Difficulty {
   for (const difficulty of DIFFICULTIES) {
@@ -111,35 +127,61 @@ export function generateLaneLevel(
   const lanes = chooseLanes(analysis, frames)
 
   const notes: LaneNote[] = []
-  let swipeDirection = 1
   let stairStep = 0
-  let arrowCandidates = 0
   for (let i = 0; i < frames.length; i++) {
     const time = frames[i] / analysis.fps
-    const hasRoom =
-      (i === 0 || time - frames[i - 1] / analysis.fps >= ARROW_CLEAR_SEC) &&
-      (i === frames.length - 1 || frames[i + 1] / analysis.fps - time >= ARROW_CLEAR_SEC)
-    const canBeArrow = hasRoom && intensity[frames[i]] <= ARROW_MAX_INTENSITY && !isInRush(time, moments)
-    if (canBeArrow) arrowCandidates += 1
-    const isSwipe = canBeArrow && arrowCandidates % difficulty.arrowEvery === 0
-    const isStar = !isSwipe && (i + 1) % STAR_EVERY === 0
-    if (isSwipe) swipeDirection = -swipeDirection
-
     let lane = lanes[i]
     if (isInRush(time, moments)) {
       lane = STAIRS[stairStep % STAIRS.length]
       stairStep += 1
     }
-
-    let kind: NoteKind = 'tap'
-    if (isSwipe) kind = 'swipe'
-    if (isStar) kind = 'star'
-    notes.push({ id: i, time, lane, kind, direction: isSwipe ? swipeDirection : 0 })
+    const kind: NoteKind = (i + 1) % STAR_EVERY === 0 ? 'star' : 'tap'
+    notes.push({ id: i, time, lane, kind, direction: 0 })
   }
 
   markLastNotesBeforePauses(notes, moments)
-  const withPairs = addPairs(notes, difficulty, analysis, intensity)
-  return addAccents(addHolds(withPairs, difficulty, moments), moments)
+  const sections = findSections(analysis, intensity)
+  const withArrows = placeArrows(notes, difficulty, sections)
+  const withPairs = addPairs(withArrows, difficulty, analysis, intensity)
+  return addAccents(addHolds(withPairs, difficulty, moments), moments, sections)
+}
+
+/**
+ * Стрелка — событие, а не случайная нота: приходит регулярно в любой части песни,
+ * а соседние ноты убираются, чтобы успеть перенести руку. На смене части она
+ * идёт перед границей и как бы перелистывает песню дальше.
+ */
+function placeArrows(notes: LaneNote[], difficulty: Difficulty, sections: Section[]): LaneNote[] {
+  const targets: number[] = []
+  for (let i = 1; i < sections.length; i++) targets.push(sections[i].start - 1)
+  const lastTime = notes.length > 0 ? notes[notes.length - 1].time : 0
+  for (let time = difficulty.arrowPeriodSec; time < lastTime; time += difficulty.arrowPeriodSec) {
+    let isFree = true
+    for (const target of targets) {
+      if (Math.abs(target - time) < difficulty.arrowPeriodSec / 2) isFree = false
+    }
+    if (isFree) targets.push(time)
+  }
+  targets.sort((a, b) => a - b)
+
+  const removed = new Set<LaneNote>()
+  let direction = 1
+  for (const target of targets) {
+    let nearest: LaneNote | null = null
+    for (const note of notes) {
+      if (note.kind !== 'tap' || removed.has(note)) continue
+      if (nearest === null || Math.abs(note.time - target) < Math.abs(nearest.time - target)) nearest = note
+    }
+    if (!nearest || Math.abs(nearest.time - target) > difficulty.arrowPeriodSec / 2) continue
+
+    nearest.kind = 'swipe'
+    nearest.direction = direction
+    direction = -direction
+    for (const note of notes) {
+      if (note !== nearest && Math.abs(note.time - nearest.time) < ARROW_CLEAR_SEC) removed.add(note)
+    }
+  }
+  return notes.filter((note) => !removed.has(note))
 }
 
 /** Минимальный интервал между нотами в этом месте песни: в сильных частях короче. */
@@ -158,9 +200,20 @@ function noteWeight(analysis: AudioAnalysis, frame: number, focus: NoteFocus, gr
   if (focus === 'voice' && isVocal) return VOCAL_PRIORITY + analysis.vocalStrength[frame]
 
   const onGrid = !hasRhythm(grid, frame) || Math.abs(snapToGrid(grid, frame) - frame) <= GRID_TOLERANCE_FRAMES
-  let weight = beatWeight(analysis, frame)
+  let weight = beatWeight(analysis, frame) + prominence(analysis, frame) * PROMINENT_BONUS
   if (focus === 'auto' && isVocal && onGrid) weight += VOCAL_AUTO_BONUS
   return onGrid ? weight : weight * OFF_GRID_PENALTY
+}
+
+/** Насколько удар выделяется на фоне соседних: 0 — как все, 1 — заметно сильнее. */
+function prominence(analysis: AudioAnalysis, frame: number): number {
+  const reach = Math.round(PROMINENCE_WINDOW_SEC * analysis.fps)
+  const from = Math.max(0, frame - reach)
+  const to = Math.min(analysis.frameCount, frame + reach)
+  let sum = 0
+  for (let i = from; i < to; i++) sum += analysis.onsetStrength[i]
+  const mean = sum / Math.max(1, to - from)
+  return Math.min(1, Math.max(0, analysis.onsetStrength[frame] / Math.max(mean, 0.01) / 4 - 0.25))
 }
 
 /** Все кандидаты на ноты: удары и начала слогов. */
@@ -314,33 +367,54 @@ function markLastNotesBeforePauses(notes: LaneNote[], moments: Moment[]): void {
 }
 
 /**
- * Отмечает смены частей песни. После паузы и через одну смену приходит длинная
- * нота SPACE, в остальных случаях парная нота на крайних дорожках.
+ * Границы настоящих частей песни получают длинную ноту SPACE. Остальные резкие
+ * переходы получают парную ноту, но редко: выпадения баса внутри бита повторяются
+ * каждые несколько секунд, и если отмечать все, акценты перестанут быть событием.
  */
-function addAccents(notes: LaneNote[], moments: Moment[]): LaneNote[] {
-  const result = [...notes]
-  let impactCount = 0
+function addAccents(notes: LaneNote[], moments: Moment[], sections: Section[]): LaneNote[] {
+  const impacts = moments.filter((moment) => moment.kind === 'impact')
+  const spaceTimes: number[] = []
+  for (let i = 1; i < sections.length; i++) spaceTimes.push(nearestImpact(sections[i].start, impacts))
+  // Длинная пауза сама по себе событие: возвращение музыки после неё всегда слышно
   for (const moment of moments) {
-    if (moment.kind !== 'impact') continue
-    const useSpace = impactCount % 2 === 0 || isAfterPause(moment, moments)
-    impactCount += 1
-    if (useSpace) {
-      result.push({ id: 0, time: moment.start, lane: 1, kind: 'space', direction: 0 })
-    } else {
-      result.push({ id: 0, time: moment.start, lane: 0, kind: 'accent', direction: 0 })
-      result.push({ id: 0, time: moment.start, lane: 2, kind: 'accent', direction: 0 })
-    }
+    if (moment.kind !== 'pause' || moment.end - moment.start < LONG_PAUSE_SEC) continue
+    const time = nearestImpact(moment.end, impacts)
+    if (!spaceTimes.some((other) => Math.abs(other - time) < ACCENT_CLEAR_SEC * 2)) spaceTimes.push(time)
   }
+
+  const result = [...notes]
+  for (const time of spaceTimes) result.push({ id: 0, time, lane: 1, kind: 'space', direction: 0 })
+
+  let lastAccent = -Infinity
+  for (const impact of impacts) {
+    const isNearSpace = spaceTimes.some((time) => Math.abs(time - impact.start) < MIN_ACCENT_GAP_SEC)
+    if (isNearSpace || impact.start - lastAccent < MIN_ACCENT_GAP_SEC) continue
+    lastAccent = impact.start
+    result.push({ id: 0, time: impact.start, lane: 0, kind: 'accent', direction: 0 })
+    result.push({ id: 0, time: impact.start, lane: 2, kind: 'accent', direction: 0 })
+  }
+
   result.sort((a, b) => a.time - b.time)
-  for (let i = 0; i < result.length; i++) result[i] = { ...result[i], id: i }
-  return result
+  // Обычные ноты вплотную к SPACE убираем: длинная нота должна звучать одна
+  const cleared = result.filter((note) => {
+    if (note.kind === 'space') return true
+    return !spaceTimes.some((time) => Math.abs(time - note.time) < ACCENT_CLEAR_SEC)
+  })
+  for (let i = 0; i < cleared.length; i++) cleared[i] = { ...cleared[i], id: i }
+  return cleared
 }
 
-function isAfterPause(impact: Moment, moments: Moment[]): boolean {
-  for (const moment of moments) {
-    if (moment.kind === 'pause' && Math.abs(moment.end - impact.start) < 0.5) return true
+function nearestImpact(time: number, impacts: Moment[]): number {
+  let best = time
+  let bestError = SECTION_SNAP_SEC
+  for (const impact of impacts) {
+    const error = Math.abs(impact.start - time)
+    if (error < bestError) {
+      bestError = error
+      best = impact.start
+    }
   }
-  return false
+  return best
 }
 
 /**

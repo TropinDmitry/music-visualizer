@@ -634,6 +634,9 @@ export class LaneScene {
     uBeams: { value: createEmptyBeams() },
     uBeamHeld: { value: new Array(MAX_BEAMS).fill(0) },
   }
+  /** Текущий цвет дорожек и колец: плавно идёт к цвету новой части песни. */
+  private readonly trackColor = colorVector(TRACK_COLOR)
+  private readonly ringColors: THREE.Vector3[] = []
   private readonly tapNotes: THREE.InstancedMesh
   private readonly plainCoins: THREE.InstancedMesh
   private readonly noteHalos: THREE.InstancedMesh
@@ -832,7 +835,9 @@ export class LaneScene {
       depthWrite: false,
     })
     const glow = new THREE.Mesh(new THREE.CircleGeometry(0.15, 48), light)
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.175, 0.04, 16, 64), createNoteMaterial(LANE_COLORS[lane], false))
+    const ringMaterial = createNoteMaterial(LANE_COLORS[lane], false)
+    this.ringColors.push(ringMaterial.uniforms.uColor.value)
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.175, 0.04, 16, 64), ringMaterial)
     const label = new THREE.Mesh(
       new THREE.PlaneGeometry(0.15, 0.15),
       new THREE.MeshBasicMaterial({ map: createKeyTexture(LANE_KEYS[lane]), transparent: true, depthTest: false }),
@@ -881,6 +886,13 @@ export class LaneScene {
     // Плавно, чтобы пауза не обрывала картинку рывком
     this.sharedUniforms.uTension.value += (tension - this.sharedUniforms.uTension.value) * 0.15
     this.sharedUniforms.uStillness.value += (stillness - this.sharedUniforms.uStillness.value) * 0.25
+  }
+
+  /** Плавно ведёт дорожки и кольца к цвету текущей части песни. */
+  setTrackColor(hex: string): void {
+    this.trackColor.lerp(colorVector(hex), 0.04)
+    for (const color of this.fanUniforms.uLaneColors.value) color.copy(this.trackColor)
+    for (const color of this.ringColors) color.copy(this.trackColor)
   }
 
   /** Сила серии 0..1 и суперрежим. Меняются плавно, чтобы награда разгоралась и гасла. */

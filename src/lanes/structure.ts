@@ -43,6 +43,10 @@ const EDGE_SEC = 2
 const PEAK_REACH_SEC = 0.2
 /** Окно усреднения силы части песни: припев длиннее нескольких тактов. */
 const INTENSITY_WINDOW_SEC = 5
+/** Окно сравнения силы до и после границы части. */
+const SECTION_COMPARE_SEC = 7
+const SECTION_MIN_JUMP = 0.22
+const SECTION_MIN_SEC = 12
 const GRID_STEP_SEC = 4
 const GRID_WINDOW_SEC = 8
 const GRID_MIN_BEAT_SEC = 0.33
@@ -92,6 +96,63 @@ export function songIntensity(analysis: AudioAnalysis): Float32Array {
   const curve = new Float32Array(count)
   for (let i = 0; i < count; i++) curve[i] = Math.min(1, Math.max(0, (smooth[i] - low) / range))
   return curve
+}
+
+/** Крупная часть песни: вступление, куплет, бридж, припев. */
+export interface Section {
+  start: number
+  end: number
+  /** Средняя сила части, 0..1. */
+  level: number
+}
+
+/**
+ * Делит песню на крупные части по скачкам силы. Смотрим на средние за несколько
+ * секунд, поэтому повторяющиеся выпадения баса внутри бита частями не считаются.
+ */
+export function findSections(analysis: AudioAnalysis, intensity: Float32Array): Section[] {
+  const fps = analysis.fps
+  const prefix = new Float64Array(intensity.length + 1)
+  for (let i = 0; i < intensity.length; i++) prefix[i + 1] = prefix[i] + intensity[i]
+  const mean = (from: number, to: number): number => {
+    const a = Math.max(0, from)
+    const b = Math.min(intensity.length, to)
+    return b <= a ? 0 : (prefix[b] - prefix[a]) / (b - a)
+  }
+
+  const reach = Math.round(SECTION_COMPARE_SEC * fps)
+  const step = Math.round(0.25 * fps)
+  const candidates: { frame: number; jump: number }[] = []
+  let previousJump = 0
+  let rising = false
+  for (let frame = reach; frame < intensity.length - reach; frame += step) {
+    const jump = Math.abs(mean(frame, frame + reach) - mean(frame - reach, frame))
+    if (jump < previousJump && rising && previousJump >= SECTION_MIN_JUMP) {
+      candidates.push({ frame: frame - step, jump: previousJump })
+    }
+    rising = jump > previousJump
+    previousJump = jump
+  }
+
+  // Сначала самые большие скачки: мелкие рядом с ними не считаются
+  candidates.sort((a, b) => b.jump - a.jump)
+  const boundaries: number[] = []
+  const minGap = SECTION_MIN_SEC * fps
+  for (const candidate of candidates) {
+    let isFree = true
+    for (const boundary of boundaries) {
+      if (Math.abs(boundary - candidate.frame) < minGap) isFree = false
+    }
+    if (isFree) boundaries.push(candidate.frame)
+  }
+  boundaries.sort((a, b) => a - b)
+
+  const sections: Section[] = []
+  const edges = [0, ...boundaries, intensity.length]
+  for (let i = 0; i + 1 < edges.length; i++) {
+    sections.push({ start: edges[i] / fps, end: edges[i + 1] / fps, level: mean(edges[i], edges[i + 1]) })
+  }
+  return sections
 }
 
 /** Сетка ритма на отрезке песни. Темп может меняться, поэтому отрезков много. */

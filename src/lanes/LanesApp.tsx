@@ -15,7 +15,7 @@ import {
   type NoteFocus,
 } from './level.ts'
 import { SoundEffects } from './sounds.ts'
-import { findMoments, type Moment } from './structure.ts'
+import { findMoments, findSections, songIntensity, type Moment, type Section } from './structure.ts'
 import {
   accuracy,
   createLaneGame,
@@ -128,6 +128,10 @@ const NO_HOLDS = [null, null, null]
 /** Если картинка разошлась со звуком на столько секунд, подтягиваем её. */
 const VIDEO_MAX_DRIFT_SEC = 0.15
 const LOW_ENERGY = 0.3
+/** Цвет дорожек по силе части песни: тихое холоднее, мощное теплее. */
+const CALM_SECTION_COLOR = '#5aa7ff'
+const NORMAL_SECTION_COLOR = '#2fd8cf'
+const STRONG_SECTION_COLORS = ['#ff8f5a', '#ffd24f']
 /** Сдвиг пальца, после которого касание считается смахиванием. */
 const SWIPE_MIN_PX = 35
 /** Какая доля экрана сверху на телефоне работает как пробел. */
@@ -148,6 +152,20 @@ const PRAISE: Record<number, string> = {
   200: 'ВЫ МАШИНА',
   300: 'ЗА ГРАНЬЮ',
   500: 'АБСОЛЮТ',
+}
+
+function sectionColor(sections: Section[], time: number): string {
+  let strongCount = 0
+  for (const section of sections) {
+    const isStrong = section.level >= 0.7
+    const isNow = time >= section.start && time < section.end
+    if (isNow) {
+      if (isStrong) return STRONG_SECTION_COLORS[strongCount % STRONG_SECTION_COLORS.length]
+      return section.level < 0.35 ? CALM_SECTION_COLOR : NORMAL_SECTION_COLOR
+    }
+    if (isStrong) strongCount += 1
+  }
+  return NORMAL_SECTION_COLOR
 }
 
 function loadBestScore(key: string): number {
@@ -193,6 +211,7 @@ export function LanesApp() {
   /** Активные касания: на телефоне пальцев может быть несколько сразу. */
   const touchesRef = useRef(new Map<number, ActiveTouch>())
   const momentsRef = useRef<Moment[]>([])
+  const sectionsRef = useRef<Section[]>([])
   const playedImpactsRef = useRef(new Set<Moment>())
   const eventHandlerRef = useRef<(event: LaneEvent | null) => void>(() => {})
 
@@ -390,6 +409,7 @@ export function LanesApp() {
         const songProgress = Math.min(1, time / currentAnalysis.duration)
         scene.setHueShift(current.colorDrift ? songProgress * COLOR_DRIFT_RADIANS : 0)
         applyMoments(time, clockTime)
+        scene.setTrackColor(sectionColor(sectionsRef.current, time))
         // Сила серии растёт с уровнем, а не с каждой нотой: так шаги заметны
         const tierCount = STREAK_TIERS.length - 1
         scene.setStreak((streakTier(game.combo) + streakProgress(game.combo) * 0.5) / tierCount, isOverdrive(game, time))
@@ -423,6 +443,7 @@ export function LanesApp() {
       }
 
       if (!isPlaying) {
+        scene.setTrackColor(NORMAL_SECTION_COLOR)
         scene.setMood(0, 0)
         scene.setStreak(0, false)
       }
@@ -597,6 +618,20 @@ export function LanesApp() {
     return () => video.removeEventListener('loadeddata', connect)
   }, [clipUrl])
 
+  /** Новый трек начинается без фона: иначе песня играла бы на прошлом клипе. */
+  const clearClip = () => {
+    if (clipUrl) URL.revokeObjectURL(clipUrl)
+    setClipUrl('')
+    setClipName('')
+    sceneRef.current?.setVideo(null)
+    const video = videoRef.current
+    if (video) {
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
+    }
+  }
+
   const loadBuffer = async (buffer: AudioBuffer, name: string) => {
     getPlayer().load(buffer)
     setAnalysis(null)
@@ -606,6 +641,7 @@ export function LanesApp() {
       setStatus(`Строим уровень… ${Math.round(fraction * 100)}%`),
     )
     momentsRef.current = findMoments(analysisResult)
+    sectionsRef.current = findSections(analysisResult, songIntensity(analysisResult))
     setAnalysis(analysisResult)
     setStatus('')
   }
@@ -613,7 +649,9 @@ export function LanesApp() {
   const handleTrackFile = async (file: File) => {
     setStatus('Читаем файл…')
     try {
-      await loadBuffer(await decodeAudioFile(file, getPlayer().context), file.name)
+      const buffer = await decodeAudioFile(file, getPlayer().context)
+      clearClip()
+      await loadBuffer(buffer, file.name)
       if (file.type.startsWith('video/')) attachClip(file) // клип сразу и звук, и картинка
     } catch (error) {
       console.error(error)
@@ -765,7 +803,10 @@ export function LanesApp() {
             </label>
             <button
               className="text-button"
-              onClick={() => void loadBuffer(createDemoBuffer(getPlayer().context), 'Демо-трек')}
+              onClick={() => {
+                clearClip()
+                void loadBuffer(createDemoBuffer(getPlayer().context), 'Демо-трек')
+              }}
             >
               Или взять демо-трек
             </button>
@@ -927,7 +968,7 @@ export function LanesApp() {
 
           <ul className="legend">
             <li>Пурпурный круг: клавиша A, S, D или нажатие на дорожку</li>
-            <li>Белый круг со стрелкой: ← или → либо смахивание, только в спокойных местах</li>
+            <li>Белый круг со стрелкой: ← или → либо смахивание, вокруг неё всегда есть свободное место</li>
             <li>Золотая звезда: три звезды включают суперрежим, очки ×2 на 8 секунд</li>
             <li>Пурпурный круг с лучом: зажмите и держите до конца</li>
             <li>Парная нота: две клавиши сразу</li>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { analyzeAudio, mixToMono } from '../audio/analyzer.ts'
 import { synthesizeDemoTrack } from '../audio/demoTrack.ts'
-import { findMoments, songIntensity } from './structure.ts'
+import { findMoments, findSections, songIntensity } from './structure.ts'
 import { DIFFICULTIES, findDifficulty, generateLaneLevel, type LaneNote } from './level.ts'
 import {
   accuracy,
@@ -54,23 +54,22 @@ describe('generateLaneLevel', () => {
     }
   })
 
-  it('стрелки идут только в спокойных местах и с запасом времени', () => {
-    const quietThenLoud = new Float32Array(44100 * 40)
-    for (let time = 2; time < 38; time += 0.8) {
+  it('стрелки приходят в любой части, и вокруг них есть место для руки', () => {
+    const track = new Float32Array(44100 * 40)
+    for (let time = 2; time < 38; time += 0.3) {
       const volume = time < 20 ? 0.2 : 0.95
       const start = Math.round(time * 44100)
-      for (let i = 0; i < 0.4 * 44100; i++) {
+      for (let i = 0; i < 0.25 * 44100; i++) {
         const t = i / 44100
-        quietThenLoud[start + i] += volume * Math.sin(2 * Math.PI * 70 * t) * Math.exp(-t * 12)
+        track[start + i] += volume * Math.sin(2 * Math.PI * 70 * t) * Math.exp(-t * 20)
       }
     }
-    const track = analyzeAudio(quietThenLoud, 44100)
-    const intensity = songIntensity(track)
-    const notes = generateLaneLevel(track, hard)
-    for (let i = 0; i < notes.length; i++) {
-      if (notes[i].kind !== 'swipe') continue
-      expect(intensity[Math.round(notes[i].time * track.fps)]).toBeLessThanOrEqual(0.45)
-      if (i > 0) expect(notes[i].time - notes[i - 1].time).toBeGreaterThanOrEqual(0.5)
+    const notes = generateLaneLevel(analyzeAudio(track, 44100), hard)
+    const arrows = notes.filter((note) => note.kind === 'swipe')
+    expect(arrows.some((note) => note.time < 18)).toBe(true)
+    expect(arrows.some((note) => note.time > 22)).toBe(true)
+    for (let i = 1; i < notes.length; i++) {
+      if (notes[i].kind === 'swipe') expect(notes[i].time - notes[i - 1].time).toBeGreaterThanOrEqual(0.4)
     }
   })
 
@@ -156,6 +155,20 @@ describe('драматургия песни', () => {
     const buildup = moments.find((moment) => moment.kind === 'buildup')
     expect(buildup).toBeDefined()
     expect(buildup?.start).toBeLessThan(17)
+  })
+
+  it('части песни находятся, а выпадения внутри бита нет', () => {
+    const intensity = songIntensity(dramatic)
+    const sections = findSections(dramatic, intensity)
+    expect(sections.length).toBeGreaterThanOrEqual(2)
+    expect(sections.length).toBeLessThanOrEqual(4)
+    expect(sections[sections.length - 1].level).toBeGreaterThan(sections[0].level)
+
+    // Ровный бит с коротким выпадением каждые 6,4 секунды
+    const steady = new Float32Array(SAMPLE_RATE * 60)
+    for (let start = 2; start < 58; start += 6.4) addKicks(steady, start, start + 5.6, 0.4, () => 0.8)
+    const steadyTrack = analyzeAudio(steady, SAMPLE_RATE)
+    expect(findSections(steadyTrack, songIntensity(steadyTrack)).length).toBeLessThanOrEqual(3)
   })
 
   it('в паузе нот нет, а после неё приходит нота SPACE', () => {
