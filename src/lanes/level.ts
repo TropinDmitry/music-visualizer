@@ -97,7 +97,7 @@ const VOICE_FOCUS_BEAT_EXTRA = 0.25
 /** В обычном режиме слог становится нотой, только если он сильный: голос поверх ритма. */
 const SYLLABLE_EXTRA = 0.25
 /** Удары ближе этого играются только ровной дробью, а случайную россыпь не сыграть. */
-const FAST_GAP_SEC = 0.25
+const FAST_GAP_SEC = 0.17
 const EVEN_GAP_TOLERANCE_SEC = 0.04
 /** В активной части порог ниже: нотами становятся и звуки потише, игра идёт бодрее. */
 const ACTIVE_SHARE_DROP = 0.2
@@ -129,6 +129,18 @@ const SUSTAIN_LANES = [0, 2]
 /** Пробел событие редкое: два рядом обесценивают друг друга. */
 const MIN_SPACE_GAP_SEC = 8
 
+/** Что происходило внутри генератора: нужно только странице-рентгену. */
+export interface LevelTrace {
+  /** Кадры ударов, прошедших порог силы. */
+  audible: number[]
+  /** Кадры, оставшиеся после минимального расстояния. */
+  spaced: number[]
+  /** Кадры, оставшиеся после проверки быстрых нот на ровность. */
+  even: number[]
+  /** Все ноты до последнего предела плотности. */
+  beforeLimit: LaneNote[]
+}
+
 export function findDifficulty(id: DifficultyId): Difficulty {
   for (const difficulty of DIFFICULTIES) {
     if (difficulty.id === id) return difficulty
@@ -140,13 +152,14 @@ export function generateLaneLevel(
   analysis: AudioAnalysis,
   difficulty: Difficulty,
   focus: NoteFocus = 'auto',
+  trace?: LevelTrace,
 ): LaneNote[] {
   const moments = findMoments(analysis)
   const intensity = songIntensity(analysis)
   const rawSustains = findSustains(analysis)
   const pulses = findSoftPulses(analysis, rawSustains)
   const sustains = withoutPulses(rawSustains, pulses)
-  const frames = pickFramesWithMoments(analysis, difficulty, moments, focus, pulses, intensity)
+  const frames = pickFramesWithMoments(analysis, difficulty, moments, focus, pulses, intensity, trace)
   const lanes = chooseLanes(analysis, frames)
 
   const notes: LaneNote[] = []
@@ -167,7 +180,9 @@ export function generateLaneLevel(
   const withArrows = placeArrowSeries(notes, difficulty, analysis, sustains)
   const withPairs = addPairs(withArrows, difficulty, analysis, intensity)
   const withSustains = addSustainHolds(withPairs, difficulty, sustains)
-  return limitDensity(addAccents(withSustains, moments, sections, sustains), difficulty)
+  const withAccents = addAccents(withSustains, moments, sections, sustains)
+  if (trace) trace.beforeLimit = withAccents
+  return limitDensity(withAccents, difficulty)
 }
 
 /** Серия ровных чётких ударов, кандидат на стрелки. */
@@ -367,6 +382,7 @@ function pickRhythmFrames(
   difficulty: Difficulty,
   focus: NoteFocus,
   intensity: Float32Array,
+  trace?: LevelTrace,
 ): number[] {
   const importance = new Map<number, number>()
 
@@ -398,7 +414,13 @@ function pickRhythmFrames(
     if (isFree) picked.push(frame)
   }
   picked.sort((a, b) => a - b)
-  return dropUnevenFast(picked, analysis.fps)
+  const even = dropUnevenFast(picked, analysis.fps)
+  if (trace) {
+    trace.audible = candidates
+    trace.spaced = picked
+    trace.even = even
+  }
+  return even
 }
 
 /** Мягкий пульс тоже становится нотами: детектор ударов его не слышит. */
@@ -486,8 +508,9 @@ function pickFramesWithMoments(
   focus: NoteFocus,
   pulses: number[],
   intensity: Float32Array,
+  trace?: LevelTrace,
 ): number[] {
-  const picked = pickRhythmFrames(analysis, difficulty, focus, intensity)
+  const picked = pickRhythmFrames(analysis, difficulty, focus, intensity, trace)
   addPulses(picked, pulses, analysis.fps, difficulty.minGapSec)
   const rushCandidates = pickNoteFrames(analysis, difficulty.minGapSec * BUILDUP_RUSH_GAP)
 

@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Рентген уровня</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b1012;
+        --panel: #141b1e;
+        --line: #2a3438;
+        --text: #dfe9e8;
+        --muted: #8fa09f;
+        --accent: #5ee6b8;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.4 system-ui, sans-serif;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 20px;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+      button,
+      select,
+      input[type='file'] {
+        color: var(--text);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font: inherit;
+      }
+      #status {
+        color: var(--muted);
+      }
+      #funnel {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .step {
+        flex: 1 1 150px;
+        padding: 8px 10px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+      }
+      .step b {
+        display: block;
+        font-size: 22px;
+      }
+      .step span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        margin-bottom: 10px;
+      }
+      #overview {
+        height: 110px;
+        cursor: pointer;
+      }
+      #detail {
+        height: 560px;
+      }
+      #legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 16px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      #legend i {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        margin-right: 5px;
+        border-radius: 2px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Рентген уровня</h1>
+    <div class="controls">
+      <input id="file" type="file" accept="audio/*,video/*" />
+      <select id="difficulty"></select>
+      <button id="play" disabled>Играть</button>
+      <label>Окно <select id="span"><option value="6">6 с</option><option value="12" selected>12 с</option><option value="30">30 с</option></select></label>
+      <span id="status">Выберите трек</span>
+    </div>
+    <div id="funnel"></div>
+    <canvas id="overview"></canvas>
+    <canvas id="detail"></canvas>
+    <div id="legend"></div>
+    <script type="module" src="/src/lanes/levelMap.ts"></script>
+  </body>
+</html>
