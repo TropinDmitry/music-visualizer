@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { analyzeAudio, mixToMono } from '../audio/analyzer.ts'
 import { synthesizeDemoTrack } from '../audio/demoTrack.ts'
-import { findMoments, findSections, findSustains, songIntensity } from './structure.ts'
+import { findMoments, findSections, findSoftPulses, withoutPulses,
+  findSustains, songIntensity, type Moment } from './structure.ts'
 import { DIFFICULTIES, findDifficulty, generateLaneLevel, type LaneNote } from './level.ts'
 import {
   accuracy,
@@ -267,6 +268,27 @@ describe('драматургия песни', () => {
     const track = analyzeAudio(samples, SAMPLE_RATE)
     const intensity = songIntensity(track)
     expect(intensity[Math.round(25 * track.fps)]).toBeGreaterThan(intensity[Math.round(5 * track.fps)])
+  })
+
+  it('мягкий ровный пульс внутри протяжного звука играется нотами, а не лучом', () => {
+    // Сначала частый бит, потом ровный аккорд, один голос которого мягко вступает раз в 0,85 секунды
+    const samples = new Float32Array(SAMPLE_RATE * 50)
+    addKicks(samples, 2, 24, 0.25, () => 0.8)
+    for (let i = 24 * SAMPLE_RATE; i < 48 * SAMPLE_RATE; i++) {
+      const t = i / SAMPLE_RATE
+      const swell = Math.exp(-((t % 0.85) / 0.25))
+      const chord = Math.sin(2 * Math.PI * 500 * t) + Math.sin(2 * Math.PI * 750 * t) + Math.sin(2 * Math.PI * 1000 * t)
+      samples[i] = 0.2 * chord + 0.2 * swell * Math.sin(2 * Math.PI * 2100 * t)
+    }
+    const track = analyzeAudio(samples, SAMPLE_RATE)
+    const sustain: Moment = { kind: 'sustain', start: 24, end: 48 }
+    const pulses = findSoftPulses(track, [sustain])
+    // Шаг настоящий: придуманных ударов на половине шага нет
+    expect(pulses.length).toBeGreaterThan(10)
+    expect(pulses.length).toBeLessThan(35)
+
+    // Там, где идёт пульс, луча больше нет
+    expect(withoutPulses([sustain], pulses).some((part) => part.start < 36 && part.end > 36)).toBe(false)
   })
 
   it('ноты стоят на ударах и повторяют их рисунок: мелкие интервалы и широкие', () => {

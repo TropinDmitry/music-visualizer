@@ -49,6 +49,23 @@ const SUSTAIN_MIN_SEC = 1.5
 /** Насколько позже найденного начала ещё может стоять удар, запустивший звук. */
 const SUSTAIN_START_SLACK_SEC = 0.1
 const SUSTAIN_MERGE_GAP_SEC = 1
+/** Мягкая пульсация: сравниваем спектр до и после момента, ударов тут детектор не видит. */
+const PULSE_STEP_FRAMES = 3
+const PULSE_SIDE_FRAMES = 4
+const PULSE_BEFORE_FRAMES = 9
+const PULSE_AFTER_FRAMES = 3
+const PULSE_MIN_CHANGE = 0.004
+/** Изменение должно торчать над соседними: плавный взлёт тона пиков не даёт. */
+const PULSE_MIN_PROMINENCE = 1.3
+/** Пульс возвращается к тому же звуку. Взлёт тона уходит всё дальше, и это не пульс. */
+const PULSE_SAME_SOUND = 0.7
+/** Какой шаг считается пульсом и сколько ударов подряд нужно, чтобы поверить в него. */
+const PULSE_MIN_PERIOD_SEC = 0.4
+const PULSE_MAX_PERIOD_SEC = 1.2
+const PULSE_MIN_HITS = 6
+const PULSE_TOLERANCE_SEC = 0.05
+/** Соседние протяжные участки ищем как один: пульс идёт и через разрывы между ними. */
+const PULSE_JOIN_GAP_SEC = 2
 /** Меньше какой доли обычного числа ударов место считается протяжным. */
 const SUSTAIN_SPARSE_SHARE = 0.45
 const SUSTAIN_MIN_PRESENCE = 0.22
@@ -221,6 +238,157 @@ export function findSustains(analysis: AudioAnalysis): Moment[] {
     block = end + 1
   }
   return mergeClose(sustains)
+}
+
+/**
+ * Внутри протяжного участка может идти мягкий ровный пульс: звук тянется, но
+ * меняется в ритме, и играть его лучом неправильно. Удары тут слабые, поэтому ищем
+ * сами изменения спектра и верим им, только если они идут ровной цепочкой:
+ * случайные изменения в цепочку не складываются.
+ */
+export function findSoftPulses(analysis: AudioAnalysis, sustains: Moment[]): number[] {
+  const pulses: number[] = []
+  let first = 0
+  while (first < sustains.length) {
+    let last = first
+    while (last + 1 < sustains.length && sustains[last + 1].start - sustains[last].end <= PULSE_JOIN_GAP_SEC) last += 1
+    const peaks = spectrumChanges(analysis, sustains[first].start, sustains[last].end)
+    const chain = longestChain(peaks)
+    if (chain.length > 0 && staysTheSameSound(analysis, chain)) pulses.push(...withMelody(chain, peaks))
+    first = last + 1
+  }
+  return pulses
+}
+
+/** Убирает из протяжных участков отрезки с пульсом: там не луч, а ноты. */
+export function withoutPulses(sustains: Moment[], pulses: number[]): Moment[] {
+  const result: Moment[] = []
+  for (const sustain of sustains) {
+    const inside = pulses.filter((time) => time >= sustain.start && time <= sustain.end)
+    if (inside.length === 0) {
+      result.push(sustain)
+      continue
+    }
+    const before = inside[0] - sustain.start
+    const after = sustain.end - inside[inside.length - 1]
+    if (before >= SUSTAIN_MIN_SEC) result.push({ ...sustain, end: inside[0] })
+    if (after >= SUSTAIN_MIN_SEC) result.push({ ...sustain, start: inside[inside.length - 1] })
+  }
+  return result
+}
+
+/** Сравнивает звук в начале и в конце цепочки. */
+function staysTheSameSound(analysis: AudioAnalysis, chain: number[]): boolean {
+  const start = spectrumAround(analysis, Math.round(chain[0] * analysis.fps))
+  const end = spectrumAround(analysis, Math.round(chain[chain.length - 1] * analysis.fps))
+  return similarity(start, end) >= PULSE_SAME_SOUND
+}
+
+/** Моменты на отрезке, где спектр заметно меняется. */
+function spectrumChanges(analysis: AudioAnalysis, fromSec: number, toSec: number): number[] {
+  const from = Math.max(PULSE_BEFORE_FRAMES, Math.round(fromSec * analysis.fps))
+  const to = Math.min(analysis.frameCount - PULSE_SIDE_FRAMES - PULSE_AFTER_FRAMES, Math.round(toSec * analysis.fps))
+  const frames: number[] = []
+  const changes: number[] = []
+  for (let frame = from; frame < to; frame += PULSE_STEP_FRAMES) {
+    const before = spectrumAround(analysis, frame - PULSE_BEFORE_FRAMES)
+    const after = spectrumAround(analysis, frame + PULSE_AFTER_FRAMES)
+    frames.push(frame)
+    changes.push(1 - similarity(before, after))
+  }
+
+  const peaks: number[] = []
+  for (let i = 2; i + 2 < changes.length; i++) {
+    const isPeak = changes[i] > changes[i - 1] && changes[i] >= changes[i + 1] && changes[i] > changes[i - 2]
+    const valley = Math.min(changes[i - 2], changes[i + 2])
+    const isProminent = changes[i] >= valley * PULSE_MIN_PROMINENCE
+    if (isPeak && isProminent && changes[i] > PULSE_MIN_CHANGE) peaks.push(frames[i] / analysis.fps)
+  }
+  return peaks
+}
+
+/** Спектр нескольких кадров. Корень уравнивает тихие полосы с громкими. */
+function spectrumAround(analysis: AudioAnalysis, start: number): Float32Array {
+  const bins = analysis.spectrumBins
+  const sum = new Float32Array(bins)
+  for (let frame = start; frame < start + PULSE_SIDE_FRAMES; frame++) {
+    for (let bin = 0; bin < bins; bin++) sum[bin] += Math.sqrt(analysis.spectrum[frame * bins + bin])
+  }
+  return sum
+}
+
+function similarity(a: Float32Array, b: Float32Array): number {
+  let product = 0
+  let squareA = 0
+  let squareB = 0
+  for (let i = 0; i < a.length; i++) {
+    product += a[i] * b[i]
+    squareA += a[i] * a[i]
+    squareB += b[i] * b[i]
+  }
+  return squareA > 0 && squareB > 0 ? product / Math.sqrt(squareA * squareB) : 1
+}
+
+/** Цепочка задаёт только границы пульса, а ноты ставим на все настоящие изменения внутри. */
+function withMelody(chain: number[], peaks: number[]): number[] {
+  const result = [...chain]
+  for (const peak of peaks) {
+    const isInside = peak > chain[0] && peak < chain[chain.length - 1]
+    if (!isInside) continue
+    let isNew = true
+    for (const time of chain) {
+      if (Math.abs(time - peak) < PULSE_TOLERANCE_SEC) isNew = false
+    }
+    if (isNew) result.push(peak)
+  }
+  result.sort((a, b) => a - b)
+  return result
+}
+
+/**
+ * Лучшая ровная цепочка: перебираем начало и шаг. Считаем только настоящие удары,
+ * а при равенстве берём шаг длиннее, иначе половинный шаг выиграл бы за счёт
+ * придуманных ударов между настоящими.
+ */
+function longestChain(peaks: number[]): number[] {
+  let best: number[] = []
+  let bestHits = 0
+  for (const start of peaks) {
+    for (let period = PULSE_MIN_PERIOD_SEC; period <= PULSE_MAX_PERIOD_SEC; period += 0.01) {
+      const chain = walkChain(peaks, start, period)
+      let hits = 0
+      for (const time of chain) {
+        if (peaks.includes(time)) hits += 1
+      }
+      if (hits >= bestHits) {
+        best = chain
+        bestHits = hits
+      }
+    }
+  }
+  return bestHits >= PULSE_MIN_HITS ? best : []
+}
+
+/** Идёт от удара с шагом. Один пропуск прощаем: мягкий удар мог не найтись. */
+function walkChain(peaks: number[], start: number, period: number): number[] {
+  const chain = [start]
+  let misses = 0
+  while (misses < 2) {
+    const expected = chain[chain.length - 1] + period
+    let found = -1
+    for (const peak of peaks) {
+      if (Math.abs(peak - expected) <= PULSE_TOLERANCE_SEC) found = peak
+    }
+    if (found >= 0) {
+      chain.push(found)
+      misses = 0
+    } else {
+      chain.push(expected)
+      misses += 1
+    }
+  }
+  // Хвост из пропусков цепочке не принадлежит
+  return chain.slice(0, chain.length - misses)
 }
 
 /** Последний удар на отрезке времени; если ударов нет, начало отрезка. */

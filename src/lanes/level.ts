@@ -3,8 +3,10 @@ import { beatWeight, pickNoteFrames } from '../game/level.ts'
 import {
   findMoments,
   findSections,
+  findSoftPulses,
   findSustains,
   songIntensity,
+  withoutPulses,
   type Moment,
   type Section,
 } from './structure.ts'
@@ -72,16 +74,13 @@ export interface Difficulty {
 export const DIFFICULTIES: Difficulty[] = [
   { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, arrowPeriodSec: 20, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
   { id: 'normal', label: 'Средняя', minGapSec: 0.28, strengthShare: 0.8, arrowPeriodSec: 12, pairEvery: 16, floorGapSec: 0.26, maxPerSecond: 4, arrowRun: 3, doubleHolds: false, canFail: true },
-  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.7, arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.14, maxPerSecond: 7, arrowRun: 4, doubleHolds: true, canFail: true },
+  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.72, arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.14, maxPerSecond: 7, arrowRun: 4, doubleHolds: true, canFail: true },
 ]
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
 const STAR_EVERY = 17
-/** Короткий луч ставим, только если после ноты правда свободно столько секунд. */
+/** Короче этого луч теряет смысл. */
 const HOLD_MIN_SEC = 0.9
-const HOLD_MAX_SEC = 2
-/** Луч заканчивается чуть раньше следующей ноты, чтобы руке хватило времени. */
-const HOLD_END_GAP_SEC = 0.25
 /** Последние секунды разгона, где ноты идут чаще. */
 const BUILDUP_RUSH_SEC = 2.5
 const BUILDUP_RUSH_GAP = 0.6
@@ -100,8 +99,8 @@ const SYLLABLE_EXTRA = 0.25
 /** Удары ближе этого играются только ровной дробью, а случайную россыпь не сыграть. */
 const FAST_GAP_SEC = 0.25
 const EVEN_GAP_TOLERANCE_SEC = 0.04
-/** Луч на месте тишины не нужен: звук должен держаться почти на прежнем уровне. */
-const HOLD_SOUND_SHARE = 0.6
+/** В активной части порог ниже: нотами становятся и звуки потише, игра идёт бодрее. */
+const ACTIVE_SHARE_DROP = 0.2
 const LEAD_IN_SEC = 1.5
 const TAIL_FRAMES = 15
 /** Вокруг серии стрелок игра освобождает место: руке нужно время перейти на другие клавиши. */
@@ -144,7 +143,10 @@ export function generateLaneLevel(
 ): LaneNote[] {
   const moments = findMoments(analysis)
   const intensity = songIntensity(analysis)
-  const frames = pickFramesWithMoments(analysis, difficulty, moments, focus)
+  const rawSustains = findSustains(analysis)
+  const pulses = findSoftPulses(analysis, rawSustains)
+  const sustains = withoutPulses(rawSustains, pulses)
+  const frames = pickFramesWithMoments(analysis, difficulty, moments, focus, pulses, intensity)
   const lanes = chooseLanes(analysis, frames)
 
   const notes: LaneNote[] = []
@@ -162,11 +164,9 @@ export function generateLaneLevel(
 
   markLastNotesBeforePauses(notes, moments)
   const sections = findSections(analysis, intensity)
-  const sustains = findSustains(analysis)
   const withArrows = placeArrowSeries(notes, difficulty, analysis, sustains)
   const withPairs = addPairs(withArrows, difficulty, analysis, intensity)
-  const withHolds = addHolds(withPairs, analysis)
-  const withSustains = addSustainHolds(withHolds, difficulty, sustains)
+  const withSustains = addSustainHolds(withPairs, difficulty, sustains)
   return limitDensity(addAccents(withSustains, moments, sections, sustains), difficulty)
 }
 
@@ -362,13 +362,18 @@ function pressesInLastSecond(kept: LaneNote[], time: number): number {
  * где подряд идут равные по силе удары, там ноты частые, где редкие бочки с мелочью
  * между ними, там редкие. Ноты стоят точно на ударах, без выравнивания.
  */
-function pickRhythmFrames(analysis: AudioAnalysis, difficulty: Difficulty, focus: NoteFocus): number[] {
+function pickRhythmFrames(
+  analysis: AudioAnalysis,
+  difficulty: Difficulty,
+  focus: NoteFocus,
+  intensity: Float32Array,
+): number[] {
   const importance = new Map<number, number>()
 
   const beats = pickNoteFrames(analysis, 0)
   const beatWeights = beats.map((frame) => beatWeight(analysis, frame))
   const beatShare = difficulty.strengthShare + (focus === 'voice' ? VOICE_FOCUS_BEAT_EXTRA : 0)
-  addAudible(importance, beats, beatWeights, beatShare, analysis.fps)
+  addAudible(importance, beats, beatWeights, beatShare, analysis.fps, intensity)
 
   if (focus !== 'beat') {
     const syllables: number[] = []
@@ -378,7 +383,7 @@ function pickRhythmFrames(analysis: AudioAnalysis, difficulty: Difficulty, focus
     }
     const weights = syllables.map((frame) => analysis.vocalStrength[frame])
     const syllableShare = difficulty.strengthShare + (focus === 'voice' ? 0 : SYLLABLE_EXTRA)
-    addAudible(importance, syllables, weights, syllableShare, analysis.fps)
+    addAudible(importance, syllables, weights, syllableShare, analysis.fps, intensity)
   }
 
   const candidates = [...importance.keys()]
@@ -396,6 +401,19 @@ function pickRhythmFrames(analysis: AudioAnalysis, difficulty: Difficulty, focus
   return dropUnevenFast(picked, analysis.fps)
 }
 
+/** Мягкий пульс тоже становится нотами: детектор ударов его не слышит. */
+function addPulses(frames: number[], pulses: number[], fps: number, minGapSec: number): void {
+  for (const time of pulses) {
+    const frame = Math.round(time * fps)
+    let isFree = true
+    for (const other of frames) {
+      if (Math.abs(other - frame) < minGapSec * fps) isFree = false
+    }
+    if (isFree) frames.push(frame)
+  }
+  frames.sort((a, b) => a - b)
+}
+
 /** Оставляет удары, близкие по силе к самому сильному в окрестности. */
 function addAudible(
   importance: Map<number, number>,
@@ -403,6 +421,7 @@ function addAudible(
   weights: number[],
   share: number,
   fps: number,
+  intensity: Float32Array,
 ): void {
   const reach = STRENGTH_REACH_SEC * fps
   for (let i = 0; i < frames.length; i++) {
@@ -411,7 +430,8 @@ function addAudible(
       if (Math.abs(frames[j] - frames[i]) <= reach) peak = Math.max(peak, weights[j])
     }
     const ratio = peak > 0 ? weights[i] / peak : 0
-    if (ratio >= share) importance.set(frames[i], Math.max(importance.get(frames[i]) ?? 0, ratio))
+    const frameIntensity = intensity[Math.min(frames[i], intensity.length - 1)]
+    if (ratio >= share - ACTIVE_SHARE_DROP * frameIntensity) importance.set(frames[i], Math.max(importance.get(frames[i]) ?? 0, ratio))
   }
 }
 
@@ -464,8 +484,11 @@ function pickFramesWithMoments(
   difficulty: Difficulty,
   moments: Moment[],
   focus: NoteFocus,
+  pulses: number[],
+  intensity: Float32Array,
 ): number[] {
-  const picked = pickRhythmFrames(analysis, difficulty, focus)
+  const picked = pickRhythmFrames(analysis, difficulty, focus, intensity)
+  addPulses(picked, pulses, analysis.fps, difficulty.minGapSec)
   const rushCandidates = pickNoteFrames(analysis, difficulty.minGapSec * BUILDUP_RUSH_GAP)
 
   const frames: number[] = []
@@ -583,34 +606,6 @@ function nearestImpact(time: number, impacts: Moment[]): number {
     }
   }
   return best
-}
-
-/**
- * Короткий луч ставится только там, где нота и правда тянется: дальше свободно,
- * а звук держится. Никаких лучей по счётчику: такие не связаны со звуком.
- */
-function addHolds(notes: LaneNote[], analysis: AudioAnalysis): LaneNote[] {
-  const result: LaneNote[] = []
-  for (let i = 0; i < notes.length; i++) {
-    const note = notes[i]
-    const next = notes[i + 1]
-    const gap = next ? next.time - note.time : 0
-    const duration = Math.min(HOLD_MAX_SEC, gap - HOLD_END_GAP_SEC)
-    if (note.kind === 'tap' && duration >= HOLD_MIN_SEC && soundHolds(analysis, note.time, duration)) {
-      result.push({ ...note, kind: 'hold', duration })
-    } else {
-      result.push(note)
-    }
-  }
-  return result
-}
-
-/** Звук в конце отрезка не сильно тише, чем в начале. */
-function soundHolds(analysis: AudioAnalysis, time: number, duration: number): boolean {
-  const start = Math.round((time + 0.1) * analysis.fps)
-  const end = Math.min(analysis.frameCount - 1, Math.round((time + duration) * analysis.fps))
-  const level = (frame: number) => analysis.mid[frame] + analysis.treble[frame]
-  return level(end) >= level(start) * HOLD_SOUND_SHARE
 }
 
 /** Для каждого удара считает «центр тяжести» спектра и делит удары на три равные группы. */
