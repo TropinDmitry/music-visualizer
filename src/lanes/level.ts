@@ -7,7 +7,8 @@ import { pickNoteFrames } from '../game/level.ts'
  * выглядят случайными.
  */
 
-export type NoteKind = 'tap' | 'swipe'
+/** tap — круг, swipe — стрелка, star — редкая золотая нота с удвоенными очками. */
+export type NoteKind = 'tap' | 'swipe' | 'star'
 
 export interface LaneNote {
   id: number
@@ -35,6 +36,9 @@ export const DIFFICULTIES: Difficulty[] = [
   { id: 'hard', label: 'Сложная', minGapSec: 0.18, swipeEvery: 6, canFail: true },
 ]
 
+/** Каждая какая нота становится звездой, если она не стрелка. */
+const STAR_EVERY = 17
+
 export function findDifficulty(id: DifficultyId): Difficulty {
   for (const difficulty of DIFFICULTIES) {
     if (difficulty.id === id) return difficulty
@@ -50,12 +54,17 @@ export function generateLaneLevel(analysis: AudioAnalysis, difficulty: Difficult
   let swipeDirection = 1
   for (let i = 0; i < frames.length; i++) {
     const isSwipe = (i + 1) % difficulty.swipeEvery === 0
+    const isStar = !isSwipe && (i + 1) % STAR_EVERY === 0
     if (isSwipe) swipeDirection = -swipeDirection
+
+    let kind: NoteKind = 'tap'
+    if (isSwipe) kind = 'swipe'
+    if (isStar) kind = 'star'
     notes.push({
       id: i,
       time: frames[i] / analysis.fps,
       lane: lanes[i],
-      kind: isSwipe ? 'swipe' : 'tap',
+      kind,
       direction: isSwipe ? swipeDirection : 0,
     })
   }

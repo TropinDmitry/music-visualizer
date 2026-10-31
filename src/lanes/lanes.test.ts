@@ -48,6 +48,13 @@ describe('generateLaneLevel', () => {
     expect(new Set(swipes.map((note) => note.direction))).toEqual(new Set([-1, 1]))
   })
 
+  it('звёзды редкие и не занимают место стрелок', () => {
+    const notes = generateLaneLevel(analysis, hard)
+    const stars = notes.filter((note) => note.kind === 'star')
+    expect(stars.length).toBeGreaterThan(0)
+    expect(stars.length).toBeLessThan(notes.length / 10)
+  })
+
   it('в тишине нот нет', () => {
     const silence = analyzeAudio(new Float32Array(44100 * 4), 44100)
     expect(generateLaneLevel(silence, hard)).toEqual([])
@@ -92,6 +99,20 @@ describe('правила', () => {
     expect(pressLane(game, 1.01, 1)).toBeNull()
     expect(pressLane(game, 1.01, 0)?.type).toBe('perfect')
     expect(pressLane(game, 1.01, 0)).toBeNull()
+  })
+
+  it('звезда нажимается как круг и даёт вдвое больше очков', () => {
+    const game = createLaneGame([{ id: 0, time: 1, lane: 2, kind: 'star', direction: 0 }], easy)
+    const event = pressLane(game, 1, 2)
+    expect(event?.kind).toBe('star')
+    expect(event?.points).toBe(500)
+  })
+
+  it('событие стрелки сообщает направление для отлёта', () => {
+    const game = createLaneGame(level, easy)
+    const event = pressSwipe(game, 2, 1)
+    expect(event?.kind).toBe('swipe')
+    expect(event?.direction).toBe(1)
   })
 
   it('свайп проверяет направление', () => {

@@ -36,7 +36,13 @@ const HIT_Y = -0.68
 const LANE_SPREAD = 0.62
 /** Во сколько раз нота вдали меньше, чем у линии нажатия. */
 const DEPTH = 7
-const NOTE_SIZE = 0.46
+const NOTE_SIZE = 0.42
+/** На сколько фишка наклонена к зрителю: её верх виден как эллипс, а снизу виден бок. */
+const NOTE_TILT = 0.6
+const STAR_COLOR = '#ffc933'
+const ARROW_COLOR = '#ffe14d'
+const MAX_FLYING_ARROWS = 6
+const ARROW_FLIGHT_SEC = 0.5
 const MAX_NOTES = 48
 const MAX_SPARKS = 160
 const SPARK_LIFETIME_SEC = 0.45
@@ -56,12 +62,30 @@ const clipFragment = /* glsl */ `
   uniform float uTrackTime;
   uniform float uEnergy;
   uniform float uDim;
+  uniform float uHueShift;
   uniform vec2 uVanish;
   uniform vec3 uTierColor;
   varying vec2 vUv;
 
   float luma(vec3 color) {
     return dot(color, vec3(0.299, 0.587, 0.114));
+  }
+
+  // Поворот оттенка: цвет раскладывается на яркость и две цветовые оси (YIQ),
+  // оси поворачиваются на угол, и яркость кадра при этом не меняется
+  vec3 rotateHue(vec3 color, float angle) {
+    float y = dot(color, vec3(0.299, 0.587, 0.114));
+    float i = dot(color, vec3(0.596, -0.274, -0.322));
+    float q = dot(color, vec3(0.211, -0.523, 0.312));
+    float c = cos(angle);
+    float s = sin(angle);
+    float rotatedI = i * c - q * s;
+    float rotatedQ = i * s + q * c;
+    return vec3(
+      y + 0.956 * rotatedI + 0.621 * rotatedQ,
+      y - 0.272 * rotatedI - 0.647 * rotatedQ,
+      y - 1.106 * rotatedI + 1.703 * rotatedQ
+    );
   }
 
   // Кадр заполняет экран без искажений: лишнее обрезается, как у object-fit: cover
@@ -149,7 +173,7 @@ const clipFragment = /* glsl */ `
     } else {
       color = spaceFlight();
     }
-    gl_FragColor = vec4(color * uDim, 1.0);
+    gl_FragColor = vec4(rotateHue(color, uHueShift) * uDim, 1.0);
   }
 `
 
@@ -202,46 +226,97 @@ const fanFragment = /* glsl */ `
   }
 `
 
-/** Текстура ноты рисуется один раз на обычном холсте, цвет подмешивается в игре. */
-function createNoteTexture(kind: 'tap' | 'swipe'): THREE.CanvasTexture {
-  const size = 128
-  const canvas = document.createElement('canvas')
-  canvas.width = size
-  canvas.height = size
-  const ctx = canvas.getContext('2d')
-  if (ctx) {
-    const center = size / 2
-    const glow = ctx.createRadialGradient(center, center, 18, center, center, center)
-    glow.addColorStop(0, 'rgba(255,255,255,0.9)')
-    glow.addColorStop(1, 'rgba(255,255,255,0)')
-    ctx.fillStyle = glow
-    ctx.fillRect(0, 0, size, size)
+/**
+ * Объёмные ноты. Свет считается по нормалям поверхности: верх фишки светлый,
+ * бок темнее, край подсвечен. Шейдер один для инстансов и для улетающих стрелок,
+ * поэтому у обычного объекта цвет берётся из uniform-а.
+ */
+const noteVertex = /* glsl */ `
+  uniform vec3 uColor;
+  varying vec3 vColor;
+  varying vec3 vNormal;
 
-    ctx.fillStyle = '#ffffff'
-    ctx.strokeStyle = '#04201a'
-    ctx.lineWidth = 7
-    if (kind === 'tap') {
-      ctx.beginPath()
-      ctx.arc(center, center, 38, 0, Math.PI * 2)
-      ctx.fill()
-      ctx.stroke()
-    } else {
-      ctx.beginPath()
-      ctx.moveTo(22, 46)
-      ctx.lineTo(66, 46)
-      ctx.lineTo(66, 22)
-      ctx.lineTo(110, 64)
-      ctx.lineTo(66, 106)
-      ctx.lineTo(66, 82)
-      ctx.lineTo(22, 82)
-      ctx.closePath()
-      ctx.fill()
-      ctx.stroke()
-    }
+  void main() {
+    #ifdef USE_INSTANCING
+      mat4 toWorld = modelMatrix * instanceMatrix;
+    #else
+      mat4 toWorld = modelMatrix;
+    #endif
+    #ifdef USE_INSTANCING_COLOR
+      vColor = instanceColor;
+    #else
+      vColor = uColor;
+    #endif
+    vNormal = normalize(mat3(toWorld) * normal);
+    gl_Position = projectionMatrix * viewMatrix * toWorld * vec4(position, 1.0);
   }
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.colorSpace = THREE.NoColorSpace
-  return texture
+`
+
+const noteFragment = /* glsl */ `
+  uniform float uOpacity;
+  varying vec3 vColor;
+  varying vec3 vNormal;
+
+  void main() {
+    vec3 normal = normalize(vNormal);
+    vec3 lightDirection = normalize(vec3(-0.25, 0.8, 0.55));
+    float light = max(dot(normal, lightDirection), 0.0);
+    float shine = pow(light, 30.0);
+    float rim = pow(1.0 - max(normal.z, 0.0), 3.0);
+    vec3 color = vColor * (0.32 + 0.85 * light) + vec3(1.0) * shine * 0.7 + vColor * rim * 0.4;
+    gl_FragColor = vec4(color, uOpacity);
+  }
+`
+
+function createNoteMaterial(color: string): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: { uColor: { value: colorVector(color) }, uOpacity: { value: 1 } },
+    vertexShader: noteVertex,
+    fragmentShader: noteFragment,
+    // Прозрачный список рисуется по renderOrder, поэтому ноты лягут поверх дорожек
+    transparent: true,
+  })
+}
+
+/** Выдавливает плоскую фигуру в толщину и кладёт её лицом вверх, как круглую фишку. */
+function extrudeFlat(shape: THREE.Shape, thickness: number): THREE.BufferGeometry {
+  const geometry = new THREE.ExtrudeGeometry(shape, {
+    depth: thickness,
+    bevelEnabled: true,
+    bevelSize: 0.025,
+    bevelThickness: 0.025,
+    bevelSegments: 3,
+  })
+  geometry.translate(0, 0, -thickness / 2)
+  geometry.rotateX(-Math.PI / 2)
+  return geometry
+}
+
+function createArrowGeometry(): THREE.BufferGeometry {
+  const shape = new THREE.Shape()
+  shape.moveTo(-0.46, -0.13)
+  shape.lineTo(0.04, -0.13)
+  shape.lineTo(0.04, -0.31)
+  shape.lineTo(0.46, 0)
+  shape.lineTo(0.04, 0.31)
+  shape.lineTo(0.04, 0.13)
+  shape.lineTo(-0.46, 0.13)
+  shape.closePath()
+  return extrudeFlat(shape, 0.14)
+}
+
+function createStarGeometry(): THREE.BufferGeometry {
+  const shape = new THREE.Shape()
+  for (let i = 0; i < 10; i++) {
+    const radius = i % 2 === 0 ? 0.5 : 0.23
+    const angle = (i / 10) * Math.PI * 2 + Math.PI / 2
+    const x = Math.cos(angle) * radius
+    const y = Math.sin(angle) * radius
+    if (i === 0) shape.moveTo(x, y)
+    else shape.lineTo(x, y)
+  }
+  shape.closePath()
+  return extrudeFlat(shape, 0.14)
 }
 
 /** Буква клавиши внутри круга-цели. */
@@ -284,6 +359,14 @@ interface Spark {
   color: THREE.Color
 }
 
+/** Стрелка, которую отбили: летит в свою сторону, вращаясь и исчезая. */
+interface FlyingArrow {
+  mesh: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>
+  bornAt: number
+  startX: number
+  direction: number
+}
+
 interface Shockwave {
   mesh: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial>
   bornAt: number
@@ -311,6 +394,7 @@ export class LaneScene {
     uBass: { value: 0 },
     uEnergy: { value: 0 },
     uDim: { value: 0.8 },
+    uHueShift: { value: 0 },
     uVanish: { value: new THREE.Vector2(0, VANISH_Y) },
   }
   private readonly fanUniforms = {
@@ -325,6 +409,9 @@ export class LaneScene {
   }
   private readonly tapNotes: THREE.InstancedMesh
   private readonly swipeNotes: THREE.InstancedMesh
+  private readonly starNotes: THREE.InstancedMesh
+  private readonly noteShadows: THREE.InstancedMesh
+  private readonly flyingArrows: FlyingArrow[] = []
   private readonly sparkMesh: THREE.InstancedMesh
   private readonly fanGroup = new THREE.Group()
   private readonly hitLine: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>
@@ -336,6 +423,7 @@ export class LaneScene {
   private videoTexture: THREE.VideoTexture | null = null
   private nextSpark = 0
   private nextShockwave = 0
+  private nextArrow = 0
   private spread = LANE_SPREAD
   private lastRenderAt = 0
 
@@ -360,16 +448,39 @@ export class LaneScene {
 
     for (let lane = 0; lane < 3; lane++) this.targets.push(this.createTarget(lane))
 
-    const noteMaterial = (kind: 'tap' | 'swipe') =>
-      new THREE.MeshBasicMaterial({ map: createNoteTexture(kind), transparent: true, depthTest: false })
-    const notePlane = new THREE.PlaneGeometry(1, 1)
-    this.tapNotes = new THREE.InstancedMesh(notePlane, noteMaterial('tap'), MAX_NOTES)
-    this.swipeNotes = new THREE.InstancedMesh(notePlane.clone(), noteMaterial('swipe'), MAX_NOTES)
-    for (const mesh of [this.tapNotes, this.swipeNotes]) {
+    // Круг — низкий цилиндр, поэтому у него виден и верх, и бок
+    const coinGeometry = new THREE.CylinderGeometry(0.5, 0.5, 0.2, 40)
+    const arrowGeometry = createArrowGeometry()
+    this.tapNotes = new THREE.InstancedMesh(coinGeometry, createNoteMaterial('#ffffff'), MAX_NOTES)
+    this.swipeNotes = new THREE.InstancedMesh(arrowGeometry, createNoteMaterial('#ffffff'), MAX_NOTES)
+    this.starNotes = new THREE.InstancedMesh(createStarGeometry(), createNoteMaterial('#ffffff'), MAX_NOTES)
+
+    // Тень под нотой: именно она создаёт ощущение, что нота лежит на дорожке
+    this.noteShadows = new THREE.InstancedMesh(
+      new THREE.CircleGeometry(0.5, 32),
+      new THREE.MeshBasicMaterial({ color: '#000000', transparent: true, opacity: 0.5, depthTest: false }),
+      MAX_NOTES * 2,
+    )
+    this.noteShadows.frustumCulled = false
+    this.noteShadows.renderOrder = 2.5
+    this.noteShadows.count = 0
+    this.scene.add(this.noteShadows)
+
+    for (const mesh of [this.tapNotes, this.swipeNotes, this.starNotes]) {
       mesh.frustumCulled = false
       mesh.renderOrder = 3
       // Без начального вызова setColorAt буфер цветов появится слишком поздно
       for (let i = 0; i < MAX_NOTES; i++) mesh.setColorAt(i, this.color.set('#ffffff'))
+      this.scene.add(mesh)
+    }
+
+    for (let i = 0; i < MAX_FLYING_ARROWS; i++) {
+      const mesh = new THREE.Mesh(arrowGeometry, createNoteMaterial(ARROW_COLOR))
+      mesh.rotation.order = 'ZXY'
+      mesh.visible = false
+      mesh.frustumCulled = false
+      mesh.renderOrder = 6
+      this.flyingArrows.push({ mesh, bornAt: -Infinity, startX: 0, direction: 1 })
       this.scene.add(mesh)
     }
 
@@ -470,6 +581,21 @@ export class LaneScene {
     this.clipUniforms.uHasVideo.value = video !== null
   }
 
+  /** Поворот оттенка всего фона в радианах: так клип меняет цвет по ходу песни. */
+  setHueShift(angle: number): void {
+    this.clipUniforms.uHueShift.value = angle
+  }
+
+  /** Стрелку отбили: она улетает в свою сторону от цели. */
+  launchArrow(lane: number, direction: number, clockTime: number): void {
+    const arrow = this.flyingArrows[this.nextArrow]
+    this.nextArrow = (this.nextArrow + 1) % MAX_FLYING_ARROWS
+    arrow.bornAt = clockTime
+    arrow.startX = this.laneX(lane)
+    arrow.direction = direction
+    arrow.mesh.visible = true
+  }
+
   setClipOptions(look: ClipLook, brightness: number, laneContrast: number): void {
     this.clipUniforms.uLook.value = LOOK_NUMBERS[look]
     this.clipUniforms.uDim.value = brightness
@@ -558,6 +684,7 @@ export class LaneScene {
 
     this.updateLanes(pressedLanes, features.beatPulse, seconds)
     this.updateNotes(features.time, notes, firstNote, judged, approachSec)
+    this.updateFlyingArrows(clockTime)
     this.updateSparks(clockTime)
     this.updateShockwaves(clockTime)
 
@@ -594,6 +721,9 @@ export class LaneScene {
   ): void {
     let tapCount = 0
     let swipeCount = 0
+    let starCount = 0
+    let shadowCount = 0
+    this.helper.rotation.order = 'ZXY'
 
     for (let i = firstNote; i < notes.length; i++) {
       const note = notes[i]
@@ -602,29 +732,69 @@ export class LaneScene {
       if (judged.has(note.id)) continue
 
       const closeness = 1 / (1 + (remaining / approachSec) * (DEPTH - 1))
+      const x = this.laneX(note.lane) * closeness
       const y = VANISH_Y + (HIT_Y - VANISH_Y) * closeness
       const size = NOTE_SIZE * closeness
-      this.helper.position.set(this.laneX(note.lane) * closeness, y, 0)
-      this.helper.rotation.set(0, 0, note.direction < 0 ? Math.PI : 0)
-      this.helper.scale.set(size, size, 1)
+
+      // Тень лежит на дорожке чуть ниже ноты и сплющена, как отпечаток на полу
+      this.helper.position.set(x, y - size * 0.2, 0)
+      this.helper.rotation.set(0, 0, 0)
+      this.helper.scale.set(size * 1.1, size * 0.62, 1)
+      this.helper.updateMatrix()
+      this.noteShadows.setMatrixAt(shadowCount, this.helper.matrix)
+      shadowCount += 1
+
+      // Нота наклоняется вслед за дорожкой, поэтому на крайних дорожках смотрит к центру
+      const laneLean = Math.atan2(this.laneX(note.lane), VANISH_Y - HIT_Y)
+      const spin = note.kind === 'star' ? time * 3 : 0
+      const heading = note.direction < 0 ? Math.PI : 0
+      this.helper.position.set(x, y, 0)
+      this.helper.rotation.set(NOTE_TILT, spin + heading, laneLean)
+      this.helper.scale.setScalar(size)
       this.helper.updateMatrix()
 
-      if (note.kind === 'tap' && tapCount < MAX_NOTES) {
+      if (note.kind === 'tap') {
         this.tapNotes.setMatrixAt(tapCount, this.helper.matrix)
         this.tapNotes.setColorAt(tapCount, this.color.set(LANE_COLORS[note.lane]))
         tapCount += 1
-      } else if (note.kind === 'swipe' && swipeCount < MAX_NOTES) {
+      } else if (note.kind === 'swipe') {
         this.swipeNotes.setMatrixAt(swipeCount, this.helper.matrix)
-        this.swipeNotes.setColorAt(swipeCount, this.color.set('#ffe14d'))
+        this.swipeNotes.setColorAt(swipeCount, this.color.set(ARROW_COLOR))
         swipeCount += 1
+      } else {
+        this.starNotes.setMatrixAt(starCount, this.helper.matrix)
+        this.starNotes.setColorAt(starCount, this.color.set(STAR_COLOR))
+        starCount += 1
       }
+      if (shadowCount >= MAX_NOTES) break
     }
 
     this.tapNotes.count = tapCount
     this.swipeNotes.count = swipeCount
-    for (const mesh of [this.tapNotes, this.swipeNotes]) {
+    this.starNotes.count = starCount
+    this.noteShadows.count = shadowCount
+    this.noteShadows.instanceMatrix.needsUpdate = true
+    for (const mesh of [this.tapNotes, this.swipeNotes, this.starNotes]) {
       mesh.instanceMatrix.needsUpdate = true
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+    }
+    this.helper.rotation.order = 'XYZ' // искры и волны ждут обычный порядок поворотов
+  }
+
+  private updateFlyingArrows(clockTime: number): void {
+    for (const arrow of this.flyingArrows) {
+      const age = (clockTime - arrow.bornAt) / ARROW_FLIGHT_SEC
+      if (age >= 1) {
+        arrow.mesh.visible = false
+        continue
+      }
+      // Квадрат даёт разгон: стрелка срывается с места и уходит за край экрана
+      const flight = age * age
+      const heading = arrow.direction < 0 ? Math.PI : 0
+      arrow.mesh.position.set(arrow.startX + arrow.direction * flight * 3.2, HIT_Y + 0.5 * age * (1 - age), 0)
+      arrow.mesh.rotation.set(NOTE_TILT, heading, -arrow.direction * age * 0.5)
+      arrow.mesh.scale.setScalar(NOTE_SIZE * (1 + 0.5 * age))
+      arrow.mesh.material.uniforms.uOpacity.value = 1 - age * age
     }
   }
 
@@ -672,7 +842,7 @@ export class LaneScene {
         if (object instanceof THREE.Mesh) {
           object.geometry.dispose()
           const material = object.material
-          if (material.map) material.map.dispose()
+          if (material.uniforms === undefined && material.map) material.map.dispose()
           material.dispose()
         }
       })

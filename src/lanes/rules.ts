@@ -1,4 +1,4 @@
-import type { Difficulty, LaneNote } from './level.ts'
+import type { Difficulty, LaneNote, NoteKind } from './level.ts'
 
 /** Правила игры: только числа, без графики и браузера. */
 
@@ -9,6 +9,7 @@ export const MISS_WARNING_STREAK = 3
 
 const GOOD_POINTS = 100
 const PERFECT_POINTS = 250
+const STAR_BONUS = 2
 const MAX_MULTIPLIER = 4
 const COMBO_PER_MULTIPLIER = 10
 const ENERGY_LOSS_MISS = 0.07
@@ -21,6 +22,9 @@ export type LaneEventType = 'perfect' | 'good' | 'miss'
 export interface LaneEvent {
   type: LaneEventType
   lane: number
+  /** Какая нота: по ней сцена и звук выбирают эффект. */
+  kind: NoteKind
+  direction: number
   /** Сколько очков принесла нота. */
   points: number
   /** Значение комбо, если на этой ноте взята круглая отметка, иначе 0. */
@@ -80,6 +84,8 @@ export function stepLanes(game: LaneGame, time: number): LaneEvent[] {
       events.push({
         type: 'miss',
         lane: note.lane,
+        kind: note.kind,
+        direction: note.direction,
         points: 0,
         milestone: 0,
         warning: game.missStreak === MISS_WARNING_STREAK,
@@ -93,7 +99,7 @@ export function stepLanes(game: LaneGame, time: number): LaneEvent[] {
 
 /** Нажатие на дорожку: ищем ближайшую обычную ноту в окне. Лишнее нажатие не штрафуется. */
 export function pressLane(game: LaneGame, time: number, lane: number): LaneEvent | null {
-  return judgeNearest(game, time, (note) => note.kind === 'tap' && note.lane === lane)
+  return judgeNearest(game, time, (note) => note.kind !== 'swipe' && note.lane === lane)
 }
 
 /** Свайп стрелкой: подходит любая дорожка, важно только направление. */
@@ -119,7 +125,8 @@ function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => bo
   if (!nearest) return null
   game.judged.add(nearest.id)
   const isPerfect = nearestError <= PERFECT_WINDOW_SEC
-  const points = (isPerfect ? PERFECT_POINTS : GOOD_POINTS) * multiplier(game)
+  const starBonus = nearest.kind === 'star' ? STAR_BONUS : 1
+  const points = (isPerfect ? PERFECT_POINTS : GOOD_POINTS) * multiplier(game) * starBonus
   game.score += points
   game.combo += 1
   game.maxCombo = Math.max(game.maxCombo, game.combo)
@@ -130,6 +137,8 @@ function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => bo
   return {
     type: isPerfect ? 'perfect' : 'good',
     lane: nearest.lane,
+    kind: nearest.kind,
+    direction: nearest.direction,
     points,
     milestone: COMBO_MILESTONES.includes(game.combo) ? game.combo : 0,
     warning: false,
@@ -144,7 +153,7 @@ export function playAutopilot(game: LaneGame, time: number): LaneEvent[] {
     if (note.time > time) break
     if (game.judged.has(note.id)) continue
     const event =
-      note.kind === 'tap' ? pressLane(game, note.time, note.lane) : pressSwipe(game, note.time, note.direction)
+      note.kind === 'swipe' ? pressSwipe(game, note.time, note.direction) : pressLane(game, note.time, note.lane)
     if (event) events.push(event)
   }
   return events
