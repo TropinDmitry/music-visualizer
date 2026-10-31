@@ -1,9 +1,11 @@
 /**
  * Звуковые эффекты игры. Они не лежат в файлах, а синтезируются Web Audio API
- * в момент события. Поэтому проект ничего не весит лишнего, а прав на сэмплы не нужно.
+ * в момент события, поэтому прав на сэмплы не нужно.
  *
- * Обычные круги беззвучны: звук получают только особые события, иначе за
- * щелчками не слышно песню.
+ * Звук намеренно мягкий: только синус с быстрым затуханием, как у калимбы или
+ * деревянного ксилофона, и всё проходит через фильтр, срезающий верха.
+ * Пила и меандр звучат «электронно» и режут слух, поэтому их здесь нет.
+ * Обычные круги беззвучны: иначе за щелчками не слышно песню.
  */
 export class SoundEffects {
   private readonly context: BaseAudioContext
@@ -12,16 +14,22 @@ export class SoundEffects {
 
   constructor(context: BaseAudioContext) {
     this.context = context
-    this.output = context.createGain()
-    this.output.connect(context.destination)
     this.noise = createNoiseBuffer(context)
+
+    const softener = context.createBiquadFilter()
+    softener.type = 'lowpass'
+    softener.frequency.value = 3200
+
+    this.output = context.createGain()
+    this.output.connect(softener)
+    softener.connect(context.destination)
   }
 
   setVolume(volume: number): void {
     this.output.gain.value = volume
   }
 
-  /** Свист улетающей стрелки: шум, полоса которого уходит вверх, и панорама в сторону полёта. */
+  /** Стрелка: только шорох воздуха, который уходит в сторону полёта. */
   arrow(direction: number): void {
     const now = this.context.currentTime
     const source = this.context.createBufferSource()
@@ -29,18 +37,18 @@ export class SoundEffects {
 
     const filter = this.context.createBiquadFilter()
     filter.type = 'bandpass'
-    filter.Q.value = 1.2
-    filter.frequency.setValueAtTime(500, now)
-    filter.frequency.exponentialRampToValueAtTime(5000, now + 0.22)
+    filter.Q.value = 0.8
+    filter.frequency.setValueAtTime(350, now)
+    filter.frequency.exponentialRampToValueAtTime(1600, now + 0.2)
 
     const gain = this.context.createGain()
     gain.gain.setValueAtTime(0.0001, now)
-    gain.gain.exponentialRampToValueAtTime(2.2, now + 0.05)
+    gain.gain.exponentialRampToValueAtTime(0.9, now + 0.06)
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.3)
 
     const panner = this.context.createStereoPanner()
     panner.pan.setValueAtTime(0, now)
-    panner.pan.linearRampToValueAtTime(direction * 0.9, now + 0.28)
+    panner.pan.linearRampToValueAtTime(direction * 0.8, now + 0.28)
 
     source.connect(filter)
     filter.connect(gain)
@@ -48,66 +56,48 @@ export class SoundEffects {
     panner.connect(this.output)
     source.start(now)
     source.stop(now + 0.32)
-
-    // Короткий восходящий тон даёт свисту «щелчок» попадания
-    this.tone(now, 520, 1040, 0.14, 0.22, 'triangle')
   }
 
-  /** Перелив золотой ноты: три быстрых колокольчика. */
+  /** Звезда: две мягкие ноты вверх. */
   star(): void {
     const now = this.context.currentTime
-    const notes = [1046.5, 1318.5, 1760]
-    for (let i = 0; i < notes.length; i++) {
-      this.tone(now + i * 0.06, notes[i], notes[i], 0.35, 0.28, 'sine')
-    }
+    this.pluck(now, 659.3, 0.45, 0.16)
+    this.pluck(now + 0.07, 880, 0.55, 0.16)
   }
 
-  /** Новый множитель: чем он выше, тем выше звук. */
+  /** Новый множитель: одна нота, чем множитель выше, тем она выше. */
   multiplierUp(multiplier: number): void {
-    const now = this.context.currentTime
-    const base = 330 * Math.pow(2, (multiplier - 2) / 3)
-    this.tone(now, base, base, 0.12, 0.25, 'square')
-    this.tone(now + 0.09, base * 1.5, base * 1.5, 0.22, 0.25, 'square')
+    this.pluck(this.context.currentTime, 330 * Math.pow(2, (multiplier - 2) / 6), 0.5, 0.14)
   }
 
-  /** Круглое комбо: аккорд с быстрым взлётом. */
+  /** Круглое комбо: мягкий аккорд, ноты вступают чуть врозь, как перебор. */
   milestone(): void {
     const now = this.context.currentTime
-    for (const frequency of [523.3, 659.3, 784, 1046.5]) {
-      this.tone(now, frequency * 0.5, frequency, 0.6, 0.16, 'sawtooth')
-    }
+    const notes = [261.6, 329.6, 392, 523.3]
+    for (let i = 0; i < notes.length; i++) this.pluck(now + i * 0.04, notes[i], 0.7, 0.1)
   }
 
-  /** Промах: глухой короткий удар, нарочно тихий, чтобы не раздражать. */
+  /** Промах: еле слышный глухой стук. */
   miss(): void {
-    const now = this.context.currentTime
-    this.tone(now, 150, 70, 0.12, 0.2, 'sine')
+    this.pluck(this.context.currentTime, 110, 0.12, 0.08)
   }
 
-  /** Предупреждение: два низких сигнала. */
+  /** Предупреждение: две низкие ноты вниз. */
   warning(): void {
     const now = this.context.currentTime
-    this.tone(now, 196, 196, 0.13, 0.28, 'square')
-    this.tone(now + 0.17, 164.8, 164.8, 0.2, 0.28, 'square')
+    this.pluck(now, 196, 0.35, 0.16)
+    this.pluck(now + 0.18, 164.8, 0.4, 0.16)
   }
 
-  /** Один тон с плавным скольжением частоты и затуханием. */
-  private tone(
-    startAt: number,
-    fromHz: number,
-    toHz: number,
-    seconds: number,
-    volume: number,
-    type: OscillatorType,
-  ): void {
+  /** Щипок струны: мягкий вход и плавное затухание, чистый синус без обертонов. */
+  private pluck(startAt: number, frequency: number, seconds: number, volume: number): void {
     const oscillator = this.context.createOscillator()
-    oscillator.type = type
-    oscillator.frequency.setValueAtTime(fromHz, startAt)
-    oscillator.frequency.exponentialRampToValueAtTime(toHz, startAt + seconds)
+    oscillator.type = 'sine'
+    oscillator.frequency.value = frequency
 
     const gain = this.context.createGain()
     gain.gain.setValueAtTime(0.0001, startAt)
-    gain.gain.exponentialRampToValueAtTime(volume, startAt + 0.012)
+    gain.gain.exponentialRampToValueAtTime(volume, startAt + 0.008)
     gain.gain.exponentialRampToValueAtTime(0.0001, startAt + seconds)
 
     oscillator.connect(gain)
@@ -117,7 +107,7 @@ export class SoundEffects {
   }
 }
 
-/** Секунда белого шума. Зерно фиксировано, но для звука это неважно. */
+/** Секунда белого шума: из неё фильтр вырезает шорох. */
 function createNoiseBuffer(context: BaseAudioContext): AudioBuffer {
   const buffer = context.createBuffer(1, context.sampleRate, context.sampleRate)
   const samples = buffer.getChannelData(0)

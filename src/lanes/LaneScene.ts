@@ -37,10 +37,18 @@ const LANE_SPREAD = 0.62
 /** Во сколько раз нота вдали меньше, чем у линии нажатия. */
 const DEPTH = 7
 const NOTE_SIZE = 0.42
-/** На сколько фишка наклонена к зрителю: её верх виден как эллипс, а снизу виден бок. */
+/**
+ * Все ноты, цели и волны лежат в одной плоскости дорожки, поэтому наклон у них
+ * общий и не зависит от дорожки. Круг в такой плоскости выглядит эллипсом.
+ */
 const NOTE_TILT = 0.6
+const PLANE_SQUASH = Math.sin(NOTE_TILT)
+/** Стрелка лежит внутри круга и занимает меньше его ширины. */
+const ARROW_IN_COIN = 0.62
 const STAR_COLOR = '#ffc933'
-const ARROW_COLOR = '#ffe14d'
+const COIN_WITH_ARROW_COLOR = '#ffe14d'
+const ARROW_ON_COIN_COLOR = '#4a3200'
+const FLYING_ARROW_COLOR = '#fff3a8'
 const MAX_FLYING_ARROWS = 6
 const ARROW_FLIGHT_SEC = 0.5
 const MAX_NOTES = 48
@@ -475,7 +483,7 @@ export class LaneScene {
     }
 
     for (let i = 0; i < MAX_FLYING_ARROWS; i++) {
-      const mesh = new THREE.Mesh(arrowGeometry, createNoteMaterial(ARROW_COLOR))
+      const mesh = new THREE.Mesh(arrowGeometry, createNoteMaterial(FLYING_ARROW_COLOR))
       mesh.rotation.order = 'ZXY'
       mesh.visible = false
       mesh.frustumCulled = false
@@ -708,7 +716,7 @@ export class LaneScene {
       target.squash += (restScale - target.squash) * spring
       target.jolt *= fade
       target.group.position.x = this.laneX(lane) + Math.sin(target.jolt * 18) * 0.03 * target.jolt
-      target.group.scale.setScalar(target.squash)
+      target.group.scale.set(target.squash, target.squash * PLANE_SQUASH, 1)
     }
   }
 
@@ -736,35 +744,41 @@ export class LaneScene {
       const y = VANISH_Y + (HIT_Y - VANISH_Y) * closeness
       const size = NOTE_SIZE * closeness
 
-      // Тень лежит на дорожке чуть ниже ноты и сплющена, как отпечаток на полу
-      this.helper.position.set(x, y - size * 0.2, 0)
+      // Тень лежит на дорожке чуть ниже ноты и сплющена так же, как сама нота
+      this.helper.position.set(x, y - size * 0.1, 0)
       this.helper.rotation.set(0, 0, 0)
-      this.helper.scale.set(size * 1.1, size * 0.62, 1)
+      this.helper.scale.set(size * 1.08, size * 1.08 * PLANE_SQUASH, 1)
       this.helper.updateMatrix()
       this.noteShadows.setMatrixAt(shadowCount, this.helper.matrix)
       shadowCount += 1
 
-      // Нота наклоняется вслед за дорожкой, поэтому на крайних дорожках смотрит к центру
-      const laneLean = Math.atan2(this.laneX(note.lane), VANISH_Y - HIT_Y)
       const spin = note.kind === 'star' ? time * 3 : 0
-      const heading = note.direction < 0 ? Math.PI : 0
       this.helper.position.set(x, y, 0)
-      this.helper.rotation.set(NOTE_TILT, spin + heading, laneLean)
+      this.helper.rotation.set(NOTE_TILT, spin, 0)
       this.helper.scale.setScalar(size)
       this.helper.updateMatrix()
 
-      if (note.kind === 'tap') {
-        this.tapNotes.setMatrixAt(tapCount, this.helper.matrix)
-        this.tapNotes.setColorAt(tapCount, this.color.set(LANE_COLORS[note.lane]))
-        tapCount += 1
-      } else if (note.kind === 'swipe') {
-        this.swipeNotes.setMatrixAt(swipeCount, this.helper.matrix)
-        this.swipeNotes.setColorAt(swipeCount, this.color.set(ARROW_COLOR))
-        swipeCount += 1
-      } else {
+      if (note.kind === 'star') {
         this.starNotes.setMatrixAt(starCount, this.helper.matrix)
         this.starNotes.setColorAt(starCount, this.color.set(STAR_COLOR))
         starCount += 1
+      } else {
+        const coinColor = note.kind === 'swipe' ? COIN_WITH_ARROW_COLOR : LANE_COLORS[note.lane]
+        this.tapNotes.setMatrixAt(tapCount, this.helper.matrix)
+        this.tapNotes.setColorAt(tapCount, this.color.set(coinColor))
+        tapCount += 1
+      }
+
+      if (note.kind === 'swipe') {
+        // Стрелка приподнята над верхом круга, чтобы лежать на нём, а не внутри
+        const lift = size * 0.13
+        this.helper.position.set(x, y + lift * Math.cos(NOTE_TILT), lift * Math.sin(NOTE_TILT))
+        this.helper.rotation.set(NOTE_TILT, note.direction < 0 ? Math.PI : 0, 0)
+        this.helper.scale.setScalar(size * ARROW_IN_COIN)
+        this.helper.updateMatrix()
+        this.swipeNotes.setMatrixAt(swipeCount, this.helper.matrix)
+        this.swipeNotes.setColorAt(swipeCount, this.color.set(ARROW_ON_COIN_COLOR))
+        swipeCount += 1
       }
       if (shadowCount >= MAX_NOTES) break
     }
@@ -791,9 +805,9 @@ export class LaneScene {
       // Квадрат даёт разгон: стрелка срывается с места и уходит за край экрана
       const flight = age * age
       const heading = arrow.direction < 0 ? Math.PI : 0
-      arrow.mesh.position.set(arrow.startX + arrow.direction * flight * 3.2, HIT_Y + 0.5 * age * (1 - age), 0)
-      arrow.mesh.rotation.set(NOTE_TILT, heading, -arrow.direction * age * 0.5)
-      arrow.mesh.scale.setScalar(NOTE_SIZE * (1 + 0.5 * age))
+      arrow.mesh.position.set(arrow.startX + arrow.direction * flight * 3.2, HIT_Y, 0.1)
+      arrow.mesh.rotation.set(NOTE_TILT, heading, 0)
+      arrow.mesh.scale.setScalar(NOTE_SIZE * ARROW_IN_COIN * (1 + 0.9 * age))
       arrow.mesh.material.uniforms.uOpacity.value = 1 - age * age
     }
   }
@@ -830,7 +844,8 @@ export class LaneScene {
         wave.mesh.material.opacity = 0
         continue
       }
-      wave.mesh.scale.setScalar(0.17 + 0.3 * age)
+      const waveSize = 0.17 + 0.3 * age
+      wave.mesh.scale.set(waveSize, waveSize * PLANE_SQUASH, 1)
       wave.mesh.material.opacity = 1 - age
     }
   }

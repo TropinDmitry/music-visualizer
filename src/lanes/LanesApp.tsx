@@ -160,7 +160,7 @@ export function LanesApp() {
     difficulty: 'normal',
     approachSec: 1.6,
     volume: 0.8,
-    effectsVolume: 0.7,
+    effectsVolume: 0.5,
     colorDrift: true,
     offsetMs: 0,
     look: 'outline',
