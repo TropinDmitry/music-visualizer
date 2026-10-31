@@ -205,7 +205,7 @@ function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => bo
   game.judged.add(nearest.id)
   if (nearest.kind === 'hold') game.holds[nearest.lane] = { note: nearest, scoredUntil: nearest.time }
   const isPerfect = nearestError <= PERFECT_WINDOW_SEC
-  const starBonus = nearest.kind === 'star' ? STAR_BONUS : 1
+  const starBonus = nearest.kind === 'star' || nearest.kind === 'accent' ? STAR_BONUS : 1
   const points = (isPerfect ? PERFECT_POINTS : GOOD_POINTS) * multiplier(game) * starBonus
   game.score += points
   game.combo += 1

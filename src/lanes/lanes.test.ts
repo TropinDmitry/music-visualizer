@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { analyzeAudio, mixToMono } from '../audio/analyzer.ts'
 import { synthesizeDemoTrack } from '../audio/demoTrack.ts'
+import { findMoments } from './structure.ts'
 import { DIFFICULTIES, findDifficulty, generateLaneLevel, type LaneNote } from './level.ts'
 import {
   accuracy,
@@ -81,6 +82,83 @@ describe('generateLaneLevel', () => {
   })
 })
 
+describe('драматургия песни', () => {
+  const SAMPLE_RATE = 44100
+
+  /** Бочка с заданной громкостью от и до. */
+  function addKicks(samples: Float32Array, from: number, to: number, step: number, volume: (t: number) => number) {
+    for (let time = from; time < to; time += step) {
+      const start = Math.round(time * SAMPLE_RATE)
+      const length = Math.round(0.45 * SAMPLE_RATE) // до полного затухания: обрыв сам звучал бы как удар
+      for (let i = 0; i < length && start + i < samples.length; i++) {
+        const t = i / SAMPLE_RATE
+        samples[start + i] += volume(time) * Math.sin(2 * Math.PI * 70 * t) * Math.exp(-t * 12)
+      }
+    }
+  }
+
+  /** Тихий куплет, разгон к секунде 20, пауза до 21, громкий припев. */
+  function dramaticTrack(): Float32Array {
+    const samples = new Float32Array(SAMPLE_RATE * 36)
+    addKicks(samples, 2, 12, 0.5, () => 0.2)
+    addKicks(samples, 12, 20, 0.5, (t) => 0.2 + ((t - 12) / 8) * 0.6)
+    addKicks(samples, 21, 34, 0.5, () => 0.9)
+    return samples
+  }
+
+  const dramatic = analyzeAudio(dramaticTrack(), SAMPLE_RATE)
+  const moments = findMoments(dramatic)
+
+  it('находит паузу и взрыв после неё', () => {
+    const pause = moments.find((moment) => moment.kind === 'pause')
+    expect(pause?.start).toBeGreaterThan(19.5)
+    expect(pause?.end).toBeLessThan(21.3)
+    const impacts = moments.filter((moment) => moment.kind === 'impact')
+    expect(impacts.some((impact) => Math.abs(impact.start - 21) < 0.3)).toBe(true)
+  })
+
+  it('находит разгон перед паузой', () => {
+    const buildup = moments.find((moment) => moment.kind === 'buildup')
+    expect(buildup).toBeDefined()
+    expect(buildup?.start).toBeLessThan(17)
+  })
+
+  it('в паузе нот нет, а на взрыве две ноты сразу', () => {
+    const notes = generateLaneLevel(dramatic, hard)
+    const pause = moments.find((moment) => moment.kind === 'pause')
+    for (const note of notes) {
+      expect(note.time > (pause?.start ?? 0) && note.time < (pause?.end ?? 0)).toBe(false)
+    }
+    const accents = notes.filter((note) => note.kind === 'accent')
+    expect(accents.length).toBeGreaterThanOrEqual(2)
+    expect(accents[0].time).toBe(accents[1].time)
+    expect(accents[0].lane).not.toBe(accents[1].lane)
+  })
+
+  it('автопилот проходит уровень с акцентами без промахов', () => {
+    const game = createLaneGame(generateLaneLevel(dramatic, hard), hard)
+    for (let time = 0; time <= dramatic.duration + 1; time += 0.5) {
+      playAutopilot(game, time)
+      stepLanes(game, time)
+    }
+    expect(game.misses).toBe(0)
+  })
+
+  it('ровный трек не содержит ложных пауз и взрывов', () => {
+    const steady = new Float32Array(SAMPLE_RATE * 30)
+    addKicks(steady, 1, 29, 0.5, () => 0.7)
+    const found = findMoments(analyzeAudio(steady, SAMPLE_RATE))
+    expect(found.filter((moment) => moment.kind !== 'buildup')).toEqual([])
+  })
+
+  it('редкие удары не считаются паузами', () => {
+    const sparse = new Float32Array(SAMPLE_RATE * 30)
+    addKicks(sparse, 1, 29, 0.8, () => 0.8)
+    const found = findMoments(analyzeAudio(sparse, SAMPLE_RATE))
+    expect(found.filter((moment) => moment.kind === 'pause')).toEqual([])
+  })
+})
+
 describe('смена бита посреди трека', () => {
   /** Бочка раз в 0,8 с в первой половине и раз в 0,4 с во второй. */
   function beatSwitchTrack(): Float32Array {
@@ -88,7 +166,7 @@ describe('смена бита посреди трека', () => {
     const samples = new Float32Array(sampleRate * 40)
     const addKick = (time: number) => {
       const start = Math.round(time * sampleRate)
-      const length = Math.round(0.2 * sampleRate)
+      const length = Math.round(0.35 * sampleRate) // до полного затухания: обрыв сам звучал бы как удар
       for (let i = 0; i < length && start + i < samples.length; i++) {
         const t = i / sampleRate
         samples[start + i] += 0.9 * Math.sin(2 * Math.PI * 70 * t) * Math.exp(-t * 18)

@@ -26,7 +26,7 @@ const LOOK_NUMBERS: Record<ClipLook, number> = { outline: 0, duotone: 1, comic: 
 const LANE_COLORS = ['#3dff9e', '#2ef2d0', '#c6ff3a']
 const LANE_KEYS = ['A', 'S', 'D']
 /** Цвет дорожек на множителях ×1…×4: игра явно меняется, пока серия растёт. */
-const TIER_COLORS = ['#3dff9e', '#2ef2d0', '#ffe14d', '#ff4fd8']
+const TIER_COLORS = ['#3dff9e', '#2ef2d0', '#9dffc4', '#d9fff0']
 
 /** Точка схода дорожек и линия нажатия, по вертикали экрана (-1 низ, 1 верх). */
 const VANISH_Y = 0.94
@@ -75,6 +75,13 @@ const clipFragment = /* glsl */ `
   uniform float uEnergy;
   uniform float uDim;
   uniform float uHueShift;
+  uniform float uFocus;
+  uniform float uTension;
+  uniform float uStillness;
+  uniform float uSpread;
+  uniform float uBundle;
+  uniform float uBend;
+  uniform float uHitY;
   uniform vec2 uVanish;
   uniform vec3 uTierColor;
   varying vec2 vUv;
@@ -130,7 +137,7 @@ const clipFragment = /* glsl */ `
 
     if (uLook == 0) {
       vec3 base = vec3(0.0, 0.06, 0.06) + source * 0.12;
-      return base + vec3(0.2, 1.0, 0.65) * smoothstep(0.12, 0.6, edges(uv));
+      return base + vec3(0.2, 0.85, 0.6) * smoothstep(0.14, 0.7, edges(uv));
     }
     if (uLook == 1) {
       float steps = floor(brightness * 5.0) / 5.0;
@@ -172,11 +179,11 @@ const clipFragment = /* glsl */ `
   void main() {
     // Лёгкий наезд камеры на басу и сдвиг каналов на ударе вместо вспышек
     vec2 uv = coverUv(vUv);
-    uv = (uv - 0.5) / (1.0 + 0.035 * uBass) + 0.5;
+    uv = (uv - 0.5) / (1.0 + 0.03 * uBass + 0.07 * uTension) + 0.5;
 
     vec3 color;
     if (uHasVideo) {
-      float shift = 0.004 * uBeat;
+      float shift = 0.002 * uBeat;
       color = vec3(
         styledClip(uv + vec2(shift, 0.0)).r,
         styledClip(uv).g,
@@ -185,7 +192,25 @@ const clipFragment = /* glsl */ `
     } else {
       color = spaceFlight();
     }
-    gl_FragColor = vec4(rotateHue(color, uHueShift) * uDim, 1.0);
+    color = rotateHue(color, uHueShift);
+
+    // Немного снижаем насыщенность: долгая игра не должна утомлять глаза.
+    // В паузе песни цвет уходит сильнее, как будто всё замирает.
+    color = mix(vec3(luma(color)), color, 0.72 - 0.5 * uStillness);
+
+    // Коридор за дорожками: клип там приглушён, чтобы взгляд оставался на нотах
+    vec2 screen = (vUv * 2.0 - 1.0) * vec2(uViewAspect, 1.0);
+    float closeness = max((uVanish.y - screen.y) / (uVanish.y - uHitY), 0.0);
+    float spacing = uBundle + (uSpread - uBundle) * pow(closeness, uBend);
+    float corridor = 1.0 - smoothstep(1.2, 2.6, abs(screen.x) / spacing);
+    color *= 1.0 - corridor * uFocus * 0.88;
+
+    // На разгоне края кадра темнеют и внимание стягивается к центру
+    float edgeDark = smoothstep(0.5, 1.5, length(screen) / max(uViewAspect, 1.0));
+    color *= 1.0 - 0.6 * uTension * edgeDark;
+    color *= 1.0 - 0.5 * uStillness;
+
+    gl_FragColor = vec4(color * uDim, 1.0);
   }
 `
 
@@ -203,6 +228,8 @@ const fanFragment = /* glsl */ `
   uniform float uLaneBad[3];
   uniform float uBundle;
   uniform float uBend;
+  uniform float uTension;
+  uniform float uStillness;
   uniform vec3 uBeams[6];
   uniform float uBeamHeld[6];
   varying vec2 vUv;
@@ -230,15 +257,15 @@ const fanFragment = /* glsl */ `
 
     // Бегущие блики внутри трубки показывают движение к игроку
     float distanceAway = 1.0 / closeness;
-    float pulse = smoothstep(0.8, 1.0, fract(distanceAway * 1.6 + uTrackTime * 1.4));
+    float pulse = smoothstep(0.8, 1.0, fract(distanceAway * 1.6 + uTrackTime * (1.4 + 2.5 * uTension)));
 
-    vec3 laneColor = mix(uLaneColors[lane], uTierColor, 0.5);
+    vec3 laneColor = mix(uLaneColors[lane], uTierColor, 0.3);
     float fade = smoothstep(0.0, 0.1, closeness);
 
     vec3 color = laneColor * (0.06 + 0.1 * uBeat + 0.28 * pulse);
     float alpha = inside * uContrast * 0.85 * fade;
 
-    color = mix(color, laneColor * 1.25 + vec3(0.2), rail);
+    color = mix(color, laneColor * (0.82 + 0.5 * uTension), rail);
     alpha = max(alpha, rail * fade);
     color = mix(color, laneColor, halo * (1.0 - rail));
     alpha = max(alpha, halo * (0.3 + 0.25 * uBeat) * fade);
@@ -259,7 +286,7 @@ const fanFragment = /* glsl */ `
     color = mix(color, vec3(1.0, 0.22, 0.3), uLaneBad[lane] * 0.75 * inside);
     alpha = max(alpha, uLaneBad[lane] * 0.6 * inside * fade);
 
-    gl_FragColor = vec4(color, alpha);
+    gl_FragColor = vec4(color, alpha * (1.0 - 0.6 * uStillness));
   }
 `
 
@@ -431,6 +458,12 @@ export class LaneScene {
     uTrackTime: { value: 0 },
     uBeat: { value: 0 },
     uTierColor: { value: colorVector(TIER_COLORS[0]) },
+    uSpread: { value: LANE_SPREAD },
+    uBundle: { value: LANE_BUNDLE },
+    uBend: { value: LANE_BEND },
+    uHitY: { value: HIT_Y },
+    uTension: { value: 0 },
+    uStillness: { value: 0 },
   }
   private readonly clipUniforms = {
     ...this.sharedUniforms,
@@ -441,21 +474,18 @@ export class LaneScene {
     uTexel: { value: new THREE.Vector2(1 / 1280, 1 / 720) },
     uBass: { value: 0 },
     uEnergy: { value: 0 },
-    uDim: { value: 0.8 },
+    uDim: { value: 0.55 },
     uHueShift: { value: 0 },
+    uFocus: { value: 0.85 },
     uVanish: { value: new THREE.Vector2(0, VANISH_Y) },
   }
   private readonly fanUniforms = {
     ...this.sharedUniforms,
     uVanishY: { value: VANISH_Y },
-    uHitY: { value: HIT_Y },
-    uSpread: { value: LANE_SPREAD },
     uContrast: { value: 0.75 },
     uLaneColors: { value: LANE_COLORS.map(colorVector) },
     uLaneGlow: { value: [0, 0, 0] },
     uLaneBad: { value: [0, 0, 0] },
-    uBundle: { value: LANE_BUNDLE },
-    uBend: { value: LANE_BEND },
     uBeams: { value: createEmptyBeams() },
     uBeamHeld: { value: new Array(MAX_BEAMS).fill(0) },
   }
@@ -618,7 +648,7 @@ export class LaneScene {
     this.camera.updateProjectionMatrix()
     // В узком окне веер сужается, чтобы крайние дорожки не уходили за экран
     this.spread = Math.min(LANE_SPREAD, (aspect * 0.8) / 1.5)
-    this.fanUniforms.uSpread.value = this.spread
+    this.sharedUniforms.uSpread.value = this.spread
     this.sharedUniforms.uViewAspect.value = aspect
   }
 
@@ -639,6 +669,22 @@ export class LaneScene {
     this.clipUniforms.uHueShift.value = angle
   }
 
+  /** Настроение момента песни: tension на разгоне, stillness в паузе, оба 0..1. */
+  setMood(tension: number, stillness: number): void {
+    // Плавно, чтобы пауза не обрывала картинку рывком
+    this.sharedUniforms.uTension.value += (tension - this.sharedUniforms.uTension.value) * 0.15
+    this.sharedUniforms.uStillness.value += (stillness - this.sharedUniforms.uStillness.value) * 0.25
+  }
+
+  /** Взрыв песни: волны сразу от всех кнопок. Клип при этом не вспыхивает. */
+  impactEffect(clockTime: number): void {
+    for (let lane = 0; lane < 3; lane++) {
+      this.addShockwave(lane, LANE_COLORS[lane], clockTime)
+      this.fanUniforms.uLaneGlow.value[lane] = 0.8
+      this.targets[lane].squash = 1.2
+    }
+  }
+
   /** Стрелку отбили: она улетает в свою сторону от цели. */
   launchArrow(lane: number, direction: number, clockTime: number): void {
     const arrow = this.flyingArrows[this.nextArrow]
@@ -649,7 +695,8 @@ export class LaneScene {
     arrow.mesh.visible = true
   }
 
-  setClipOptions(look: ClipLook, brightness: number, laneContrast: number): void {
+  setClipOptions(look: ClipLook, brightness: number, laneContrast: number, focus: number): void {
+    this.clipUniforms.uFocus.value = focus
     this.clipUniforms.uLook.value = LOOK_NUMBERS[look]
     this.clipUniforms.uDim.value = brightness
     this.fanUniforms.uContrast.value = laneContrast
@@ -689,7 +736,7 @@ export class LaneScene {
     this.addShockwave(lane, color, clockTime)
     if (isPerfect) this.addShockwave(lane, LANE_COLORS[lane], clockTime - 0.08)
 
-    const count = isPerfect ? 26 : 14
+    const count = isPerfect ? 14 : 8
     for (let i = 0; i < count; i++) {
       const spark = this.sparks[this.nextSpark]
       this.nextSpark = (this.nextSpark + 1) % MAX_SPARKS
@@ -829,7 +876,9 @@ export class LaneScene {
         this.starNotes.setColorAt(starCount, this.color.set(STAR_COLOR))
         starCount += 1
       } else {
-        const coinColor = note.kind === 'swipe' ? COIN_WITH_ARROW_COLOR : LANE_COLORS[note.lane]
+        let coinColor = LANE_COLORS[note.lane]
+        if (note.kind === 'swipe') coinColor = COIN_WITH_ARROW_COLOR
+        if (note.kind === 'accent') coinColor = '#ffffff'
         this.tapNotes.setMatrixAt(tapCount, this.helper.matrix)
         this.tapNotes.setColorAt(tapCount, this.color.set(coinColor))
         tapCount += 1

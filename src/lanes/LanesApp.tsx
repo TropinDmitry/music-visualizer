@@ -8,6 +8,7 @@ import { formatTime } from '../formatting.ts'
 import { CLIP_LOOKS, LaneScene, type ClipLook } from './LaneScene.ts'
 import { DIFFICULTIES, findDifficulty, generateLaneLevel, type DifficultyId } from './level.ts'
 import { SoundEffects } from './sounds.ts'
+import { findMoments, type Moment } from './structure.ts'
 import {
   accuracy,
   createLaneGame,
@@ -36,6 +37,7 @@ interface Settings {
   offsetMs: number
   look: ClipLook
   clipBrightness: number
+  clipFocus: number
   laneContrast: number
   autopilot: boolean
 }
@@ -98,7 +100,7 @@ const NO_HOLDS = [null, null, null]
 const VIDEO_MAX_DRIFT_SEC = 0.15
 const LOW_ENERGY = 0.3
 /** На сколько радиан поворачивается оттенок клипа от начала песни до конца. */
-const COLOR_DRIFT_RADIANS = 4
+const COLOR_DRIFT_RADIANS = 2
 const MAX_POPUPS = 6
 /** Расстояние между дорожками на линии нажатия, в долях высоты экрана. */
 const POPUP_LANE_STEP_VH = 31
@@ -155,6 +157,8 @@ export function LanesApp() {
   const soundsRef = useRef<SoundEffects | null>(null)
   const lastMultiplierRef = useRef(1)
   const pointerLaneRef = useRef<number | null>(null)
+  const momentsRef = useRef<Moment[]>([])
+  const playedImpactsRef = useRef(new Set<Moment>())
   const eventHandlerRef = useRef<(event: LaneEvent | null) => void>(() => {})
 
   const [screen, setScreen] = useState<Screen>('menu')
@@ -175,7 +179,8 @@ export function LanesApp() {
     colorDrift: true,
     offsetMs: 0,
     look: 'outline',
-    clipBrightness: 0.8,
+    clipBrightness: 0.55,
+    clipFocus: 0.85,
     laneContrast: 0.75,
     autopilot: false,
   })
@@ -296,6 +301,25 @@ export function LanesApp() {
     }
     eventHandlerRef.current = handleEvent
 
+    /** Разгон, пауза и взрыв песни меняют сцену, даже если игрок ничего не нажимает. */
+    const applyMoments = (time: number, clockTime: number) => {
+      let tension = 0
+      let stillness = 0
+      for (const moment of momentsRef.current) {
+        const isNow = time >= moment.start && time < moment.end
+        if (moment.kind === 'buildup' && isNow) {
+          tension = (time - moment.start) / (moment.end - moment.start)
+        }
+        if (moment.kind === 'pause' && isNow) stillness = 1
+        if (moment.kind === 'impact' && time >= moment.start && !playedImpactsRef.current.has(moment)) {
+          playedImpactsRef.current.add(moment)
+          scene.impactEffect(clockTime)
+          soundsRef.current?.impact()
+        }
+      }
+      scene.setMood(tension, stillness)
+    }
+
     const syncVideo = (time: number) => {
       const video = videoRef.current
       if (!video || !video.src) return
@@ -321,6 +345,7 @@ export function LanesApp() {
         soundsRef.current?.setVolume(current.effectsVolume)
         const songProgress = Math.min(1, time / currentAnalysis.duration)
         scene.setHueShift(current.colorDrift ? songProgress * COLOR_DRIFT_RADIANS : 0)
+        applyMoments(time, clockTime)
 
         const now = performance.now()
         if (now - lastHudAt > 80) {
@@ -346,7 +371,8 @@ export function LanesApp() {
         scene.setHueShift(0)
       }
 
-      scene.setClipOptions(current.look, current.clipBrightness, current.laneContrast)
+      if (!isPlaying) scene.setMood(0, 0)
+      scene.setClipOptions(current.look, current.clipBrightness, current.laneContrast, current.clipFocus)
       const inMenu = currentScreen === 'menu'
       scene.render(
         features,
@@ -493,6 +519,7 @@ export function LanesApp() {
     const analysisResult = await runAnalysisInWorker(audioBufferToMono(buffer), buffer.sampleRate, (fraction) =>
       setStatus(`Строим уровень… ${Math.round(fraction * 100)}%`),
     )
+    momentsRef.current = findMoments(analysisResult)
     setAnalysis(analysisResult)
     setStatus('')
   }
@@ -514,6 +541,7 @@ export function LanesApp() {
     const difficulty = findDifficulty(settings.difficulty)
     gameRef.current = createLaneGame(generateLaneLevel(analysis, difficulty), difficulty)
     lastMultiplierRef.current = 1
+    playedImpactsRef.current = new Set()
     setHud(EMPTY_HUD)
     setBanner(null)
     setPopups([])
@@ -675,6 +703,19 @@ export function LanesApp() {
             </label>
             <label className="slider">
               <span>
+                Приглушить клип за дорожками <output>{Math.round(settings.clipFocus * 100)}%</output>
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={settings.clipFocus}
+                onChange={(event) => update({ clipFocus: Number(event.target.value) })}
+              />
+            </label>
+            <label className="slider">
+              <span>
                 Контраст дорожек <output>{Math.round(settings.laneContrast * 100)}%</output>
               </span>
               <input
@@ -767,6 +808,7 @@ export function LanesApp() {
             <li>Жёлтая стрелка: ← или → в ту же сторону</li>
             <li>Золотая звезда: как круг, очки ×2</li>
             <li>Круг с лучом: зажмите и держите до конца</li>
+            <li>Белая пара: две клавиши сразу на взрыве песни</li>
           </ul>
         </main>
       )}

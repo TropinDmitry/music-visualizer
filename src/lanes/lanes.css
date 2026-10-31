@@ -26,11 +26,11 @@
 }
 
 .hud.tier-3 {
-  --tier: #ffe14d;
+  --tier: #9dffc4;
 }
 
 .hud.tier-4 {
-  --tier: #ff4fd8;
+  --tier: #d9fff0;
 }
 
 /* Красная рамка по краям экрана: предупреждение без вспышки в центре */
@@ -177,7 +177,7 @@
 }
 
 .banner strong {
-  font-size: clamp(30px, 6vw, 58px);
+  font-size: clamp(26px, 4vw, 42px);
   font-weight: 900;
   letter-spacing: 0.08em;
   color: var(--tier);

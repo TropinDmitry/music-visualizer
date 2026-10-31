@@ -70,6 +70,13 @@ export class SoundEffects {
     this.pluck(this.context.currentTime, 523.3, 0.5, 0.14)
   }
 
+  /** Взрыв песни: низкий мягкий удар, чтобы подчеркнуть момент. */
+  impact(): void {
+    const now = this.context.currentTime
+    this.pluck(now, 98, 0.5, 0.2)
+    this.pluck(now, 146.8, 0.4, 0.12)
+  }
+
   /** Новый множитель: одна нота, чем множитель выше, тем она выше. */
   multiplierUp(multiplier: number): void {
     this.pluck(this.context.currentTime, 330 * Math.pow(2, (multiplier - 2) / 6), 0.5, 0.14)
