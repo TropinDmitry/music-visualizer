@@ -6,7 +6,14 @@ import { audioBufferToMono, createDemoBuffer, decodeAudioFile } from '../audio/l
 import { runAnalysisInWorker } from '../audio/runAnalysis.ts'
 import { formatTime } from '../formatting.ts'
 import { CLIP_LOOKS, LaneScene, type ClipLook } from './LaneScene.ts'
-import { DIFFICULTIES, findDifficulty, generateLaneLevel, type DifficultyId } from './level.ts'
+import {
+  DIFFICULTIES,
+  findDifficulty,
+  generateLaneLevel,
+  NOTE_FOCUSES,
+  type DifficultyId,
+  type NoteFocus,
+} from './level.ts'
 import { SoundEffects } from './sounds.ts'
 import { findMoments, type Moment } from './structure.ts'
 import {
@@ -36,6 +43,7 @@ type Screen = 'menu' | 'playing' | 'paused' | 'results'
 
 interface Settings {
   difficulty: DifficultyId
+  focus: NoteFocus
   approachSec: number
   volume: number
   effectsVolume: number
@@ -200,6 +208,7 @@ export function LanesApp() {
   const [result, setResult] = useState<GameResult | null>(null)
   const [settings, setSettings] = useState<Settings>({
     difficulty: 'normal',
+    focus: 'auto',
     approachSec: 1.6,
     volume: 0.8,
     effectsVolume: 0.5,
@@ -616,7 +625,7 @@ export function LanesApp() {
     const player = playerRef.current
     if (!analysis || !player) return
     const difficulty = findDifficulty(settings.difficulty)
-    gameRef.current = createLaneGame(generateLaneLevel(analysis, difficulty), difficulty)
+    gameRef.current = createLaneGame(generateLaneLevel(analysis, difficulty, settings.focus), difficulty)
     lastMultiplierRef.current = 1
     playedImpactsRef.current = new Set()
     setHud(EMPTY_HUD)
@@ -776,6 +785,17 @@ export function LanesApp() {
                   onClick={() => update({ difficulty: difficulty.id })}
                 >
                   {difficulty.label}
+                </button>
+              ))}
+            </div>
+            <div className="segmented" aria-label="На что ориентируются ноты">
+              {NOTE_FOCUSES.map((focus) => (
+                <button
+                  key={focus.id}
+                  className={focus.id === settings.focus ? 'is-active' : ''}
+                  onClick={() => update({ focus: focus.id })}
+                >
+                  {focus.label}
                 </button>
               ))}
             </div>

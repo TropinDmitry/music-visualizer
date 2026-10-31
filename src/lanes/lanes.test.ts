@@ -179,6 +179,11 @@ describe('драматургия песни', () => {
       }
     }
     addKicks(samples, 20, 38, 0.7, () => 0.95)
+    // Припев заполняет весь спектр: добавляем плотный гул на нескольких частотах
+    for (let i = 20 * SAMPLE_RATE; i < 38 * SAMPLE_RATE; i++) {
+      const t = i / SAMPLE_RATE
+      samples[i] += 0.1 * (Math.sin(2 * Math.PI * 900 * t) + Math.sin(2 * Math.PI * 2400 * t) + Math.sin(2 * Math.PI * 6500 * t))
+    }
 
     const track = analyzeAudio(samples, SAMPLE_RATE)
     const intensity = songIntensity(track)
@@ -188,6 +193,59 @@ describe('драматургия песни', () => {
     const verse = notes.filter((note) => note.time >= 4 && note.time < 18).length
     const chorus = notes.filter((note) => note.time >= 22 && note.time < 36).length
     expect(chorus).toBeGreaterThan(verse)
+  })
+
+  it('тяжёлый бас без заполненного спектра не считается мощной частью', () => {
+    // Вступление: только бас. Дальше: бас ровнее, зато есть середина и верх
+    const samples = new Float32Array(SAMPLE_RATE * 40)
+    for (let i = 0; i < samples.length; i++) {
+      const t = i / SAMPLE_RATE
+      if (t < 12) {
+        samples[i] = 0.8 * Math.sin(2 * Math.PI * 70 * t)
+      } else {
+        samples[i] =
+          0.3 * Math.sin(2 * Math.PI * 70 * t) +
+          0.15 * (Math.sin(2 * Math.PI * 1000 * t) + Math.sin(2 * Math.PI * 7000 * t))
+      }
+    }
+    const track = analyzeAudio(samples, SAMPLE_RATE)
+    const intensity = songIntensity(track)
+    expect(intensity[Math.round(25 * track.fps)]).toBeGreaterThan(intensity[Math.round(5 * track.fps)])
+  })
+
+  it('разговор без ритма даёт меньше нот, чем ровный бит', () => {
+    const samples = new Float32Array(SAMPLE_RATE * 40)
+    let seed = 11
+    const random = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0
+      return seed / 2 ** 32
+    }
+    // Вступление: слоги через случайные промежутки, как речь
+    for (let time = 2; time < 18; time += 0.12 + random() * 0.5) {
+      const start = Math.round(time * SAMPLE_RATE)
+      for (let i = 0; i < 0.1 * SAMPLE_RATE; i++) {
+        const t = i / SAMPLE_RATE
+        samples[start + i] += 0.3 * Math.sin(2 * Math.PI * 700 * t) * Math.sin((Math.PI * i) / (0.1 * SAMPLE_RATE))
+      }
+    }
+    // Дальше ровный плотный бит
+    addKicks(samples, 18, 38, 0.5, () => 0.9)
+    for (let i = 18 * SAMPLE_RATE; i < 38 * SAMPLE_RATE; i++) {
+      const t = i / SAMPLE_RATE
+      samples[i] += 0.1 * (Math.sin(2 * Math.PI * 1100 * t) + Math.sin(2 * Math.PI * 7000 * t))
+    }
+    const notes = generateLaneLevel(analyzeAudio(samples, SAMPLE_RATE), hard)
+    const speech = notes.filter((note) => note.time >= 3 && note.time < 17).length
+    const music = notes.filter((note) => note.time >= 20 && note.time < 34).length
+    expect(music).toBeGreaterThan(speech)
+  })
+
+  it('режим «По голосу» ставит ноту на слог, даже если он вне ритма', () => {
+    const track = analyzeAudio(new Float32Array(44100 * 10), 44100)
+    const vocalFrame = Math.round(4 * track.fps)
+    track.vocalOnsets[vocalFrame] = 1
+    track.vocalStrength[vocalFrame] = 1
+    expect(generateLaneLevel(track, easy, 'voice').some((note) => Math.abs(note.time - 4) < 0.02)).toBe(true)
   })
 
   it('автопилот проходит уровень с акцентами без промахов', () => {
@@ -330,15 +388,6 @@ describe('правила', () => {
     expect(streakTier(500)).toBe(4)
     expect(streakProgress(17)).toBeCloseTo(7 / 15)
     expect(streakProgress(500)).toBe(1)
-  })
-
-  it('ноты в первую очередь встают на слоги', () => {
-    const track = analyzeAudio(new Float32Array(44100 * 10), 44100)
-    const vocalFrame = Math.round(4 * track.fps)
-    track.vocalOnsets[vocalFrame] = 1
-    track.vocalStrength[vocalFrame] = 1
-    const notes = generateLaneLevel(track, easy)
-    expect(notes.some((note) => Math.abs(note.time - 4) < 0.02)).toBe(true)
   })
 
   it('событие стрелки сообщает направление для отлёта', () => {

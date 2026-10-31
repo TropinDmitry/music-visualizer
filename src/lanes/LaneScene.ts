@@ -66,7 +66,7 @@ const MAX_SPACE_BARS = 4
 /** Длинная нота шире всех трёх дорожек, в долях расстояния между ними. */
 const SPACE_BAR_WIDTH = 2.7
 const SPACE_BAR_DEPTH = 0.62
-const SPACE_BURST_SEC = 0.6
+const SPACE_BURST_SEC = 0.75
 const MAX_SPARKS = 160
 const SPARK_LIFETIME_SEC = 0.45
 const MAX_SHOCKWAVES = 8
@@ -459,7 +459,7 @@ function createSpaceTexture(): THREE.CanvasTexture {
   return texture
 }
 
-/** Нажатая плашка распадается на мелкие кусочки: порог растёт, и всё больше точек исчезает. */
+/** Нажатая плашка мягко тает: крупные плавные пятна, никаких мелких осколков. */
 const spaceBurstVertex = /* glsl */ `
   varying vec2 vUv;
   void main() {
@@ -473,18 +473,12 @@ const spaceBurstFragment = /* glsl */ `
   uniform float uDissolve;
   varying vec2 vUv;
 
-  float grain(vec2 cell) {
-    return fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
-  }
-
   void main() {
     vec4 texel = texture2D(uMap, vUv);
-    float noise = grain(floor(vUv * vec2(90.0, 22.0)));
-    // Край исчезающей области горит: так виден именно распад, а не простое затухание
-    float edge = smoothstep(uDissolve, uDissolve + 0.12, noise);
-    if (edge <= 0.0) discard;
-    vec3 color = mix(vec3(0.75, 0.9, 1.0), texel.rgb, edge);
-    gl_FragColor = vec4(color, texel.a * edge * (1.0 - uDissolve * 0.4));
+    // Сумма синусов даёт плавные пятна: плашка тает неравномерно, но без резких краёв
+    float cloud = 0.5 + 0.25 * sin(vUv.x * 7.0 + 1.3) + 0.25 * sin(vUv.y * 5.0 + vUv.x * 3.0);
+    float fade = 1.0 - smoothstep(cloud - 0.55, cloud + 0.55, uDissolve * 1.6 - 0.3);
+    gl_FragColor = vec4(mix(vec3(0.85, 0.95, 1.0), texel.rgb, fade), texel.a * fade);
   }
 `
 
@@ -896,11 +890,14 @@ export class LaneScene {
     this.sharedUniforms.uOverdrive.value += (overdrive - this.sharedUniforms.uOverdrive.value) * 0.1
   }
 
-  /** Пробел попал: плашка вспыхивает, растёт и рассыпается. */
+  /** Пробел попал: плашка плавно растёт и тает, кнопки мягко подсвечиваются. */
   spaceHitEffect(clockTime: number): void {
     this.spaceBurstAt = clockTime
     this.spaceBurst.visible = true
-    for (let lane = 0; lane < 3; lane++) this.hitEffect(lane, true, clockTime)
+    for (let lane = 0; lane < 3; lane++) {
+      this.targets[lane].light.opacity = 1
+      this.pressEffect(lane)
+    }
   }
 
   /** Пробел нажат без ноты: кнопки слегка отзываются, чтобы нажатие было видно. */
@@ -914,9 +911,9 @@ export class LaneScene {
       this.spaceBurst.visible = false
       return
     }
-    // Быстро вырастает в начале и дальше почти не меняется, пока рассыпается
-    const growth = 1 + 1.1 * (1 - Math.pow(1 - age, 3))
-    this.spaceBurst.position.set(0, HIT_Y + 0.12 * age, 0)
+    // Спокойное плавное увеличение без рывка в начале
+    const growth = 1 + 0.35 * (1 - Math.pow(1 - age, 2))
+    this.spaceBurst.position.set(0, HIT_Y + 0.04 * age, 0)
     this.spaceBurst.scale.set(this.spread * SPACE_BAR_WIDTH * growth, this.spread * SPACE_BAR_DEPTH * growth, 1)
     this.spaceBurst.material.uniforms.uDissolve.value = age
   }

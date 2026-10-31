@@ -1,6 +1,6 @@
 import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { beatWeight, pickNoteFrames } from '../game/level.ts'
-import { findMoments, songIntensity, type Moment } from './structure.ts'
+import { findBeatGrid, findMoments, hasRhythm, snapToGrid, songIntensity, type BeatGrid, type Moment } from './structure.ts'
 
 /**
  * Уровень для трёх дорожек. Дорожка выбирается по высоте звука: низкие удары
@@ -28,6 +28,18 @@ export interface LaneNote {
 }
 
 export type DifficultyId = 'easy' | 'normal' | 'hard'
+
+/**
+ * На что ориентируются ноты. Универсального ответа нет: песне с текстом подходит
+ * голос, инструменталу ритм, поэтому выбор остаётся за игроком.
+ */
+export type NoteFocus = 'auto' | 'voice' | 'beat'
+
+export const NOTE_FOCUSES: { id: NoteFocus; label: string }[] = [
+  { id: 'auto', label: 'Авто' },
+  { id: 'voice', label: 'По голосу' },
+  { id: 'beat', label: 'По ритму' },
+]
 
 export interface Difficulty {
   id: DifficultyId
@@ -68,6 +80,12 @@ const INTENSE_GAP_FACTOR = 0.7
 const INTENSE_LEVEL = 0.55
 /** Запас веса голоса над любым ударом: вес удара не бывает больше трёх. */
 const VOCAL_PRIORITY = 3
+/** В режиме «Авто» слог важнее обычного удара, но не отменяет ритм. */
+const VOCAL_AUTO_BONUS = 1.2
+/** Вне сетки ритма нота теряет столько важности. */
+const OFF_GRID_PENALTY = 0.45
+/** Удар считается попавшим в сетку, если отстоит от неё не больше этого. */
+const GRID_TOLERANCE_FRAMES = 5
 const LEAD_IN_SEC = 1.5
 const TAIL_FRAMES = 15
 /** Стрелки только в спокойных местах: в сильной части руке и без них хватает работы. */
@@ -82,10 +100,14 @@ export function findDifficulty(id: DifficultyId): Difficulty {
   return DIFFICULTIES[0]
 }
 
-export function generateLaneLevel(analysis: AudioAnalysis, difficulty: Difficulty): LaneNote[] {
+export function generateLaneLevel(
+  analysis: AudioAnalysis,
+  difficulty: Difficulty,
+  focus: NoteFocus = 'auto',
+): LaneNote[] {
   const moments = findMoments(analysis)
   const intensity = songIntensity(analysis)
-  const frames = pickFramesWithMoments(analysis, difficulty, moments, intensity)
+  const frames = pickFramesWithMoments(analysis, difficulty, moments, intensity, focus)
   const lanes = chooseLanes(analysis, frames)
 
   const notes: LaneNote[] = []
@@ -127,12 +149,18 @@ function localGap(frame: number, minGapSec: number, intensity: Float32Array): nu
 }
 
 /**
- * Важность кандидата на ноту. Голос важнее всего: игрок поёт песню про себя
- * и ждёт ноту на слове, а удары заполняют то, что осталось без голоса.
+ * Важность кандидата на ноту. В режиме «По голосу» слог важнее всего. В остальных
+ * главное ритм: нота вне сетки ощущается как рассинхрон, поэтому такие кандидаты
+ * слабее, а слог лишь усиливает ноту, если она и так в такт.
  */
-function noteWeight(analysis: AudioAnalysis, frame: number): number {
-  if (analysis.vocalOnsets[frame] === 1) return VOCAL_PRIORITY + analysis.vocalStrength[frame]
-  return beatWeight(analysis, frame)
+function noteWeight(analysis: AudioAnalysis, frame: number, focus: NoteFocus, grid: BeatGrid): number {
+  const isVocal = analysis.vocalOnsets[frame] === 1
+  if (focus === 'voice' && isVocal) return VOCAL_PRIORITY + analysis.vocalStrength[frame]
+
+  const onGrid = !hasRhythm(grid, frame) || Math.abs(snapToGrid(grid, frame) - frame) <= GRID_TOLERANCE_FRAMES
+  let weight = beatWeight(analysis, frame)
+  if (focus === 'auto' && isVocal && onGrid) weight += VOCAL_AUTO_BONUS
+  return onGrid ? weight : weight * OFF_GRID_PENALTY
 }
 
 /** Все кандидаты на ноты: удары и начала слогов. */
@@ -146,9 +174,17 @@ function noteCandidates(analysis: AudioAnalysis, difficulty: Difficulty): number
 }
 
 /** Отбирает ноты: сначала важные, а частоту задаёт сила части песни. */
-function pickByIntensity(analysis: AudioAnalysis, difficulty: Difficulty, intensity: Float32Array): number[] {
+function pickByIntensity(
+  analysis: AudioAnalysis,
+  difficulty: Difficulty,
+  intensity: Float32Array,
+  focus: NoteFocus,
+): number[] {
+  const grid = findBeatGrid(analysis)
   const candidates = noteCandidates(analysis, difficulty)
-  candidates.sort((a, b) => noteWeight(analysis, b) - noteWeight(analysis, a))
+  const weights = new Map<number, number>()
+  for (const frame of candidates) weights.set(frame, noteWeight(analysis, frame, focus, grid))
+  candidates.sort((a, b) => (weights.get(b) ?? 0) - (weights.get(a) ?? 0))
 
   const picked: number[] = []
   for (const frame of candidates) {
@@ -160,7 +196,19 @@ function pickByIntensity(analysis: AudioAnalysis, difficulty: Difficulty, intens
     if (isFree) picked.push(frame)
   }
   picked.sort((a, b) => a - b)
-  return fillIntenseGaps(picked, analysis, difficulty, intensity)
+  const aligned = focus === 'voice' ? picked : alignToGrid(picked, grid)
+  return fillIntenseGaps(aligned, analysis, difficulty, intensity)
+}
+
+/** Подтягивает ноты, стоящие рядом с сеткой, точно на неё: так ритм ровнее на ощупь. */
+function alignToGrid(frames: number[], grid: BeatGrid): number[] {
+  const aligned: number[] = []
+  for (const frame of frames) {
+    const snapped = snapToGrid(grid, frame)
+    const target = Math.abs(snapped - frame) <= GRID_TOLERANCE_FRAMES ? snapped : frame
+    if (aligned[aligned.length - 1] !== target) aligned.push(target)
+  }
+  return aligned
 }
 
 /**
@@ -215,8 +263,9 @@ function pickFramesWithMoments(
   difficulty: Difficulty,
   moments: Moment[],
   intensity: Float32Array,
+  focus: NoteFocus,
 ): number[] {
-  const picked = pickByIntensity(analysis, difficulty, intensity)
+  const picked = pickByIntensity(analysis, difficulty, intensity, focus)
   const rushCandidates = pickNoteFrames(analysis, difficulty.minGapSec * BUILDUP_RUSH_GAP)
 
   const frames: number[] = []
