@@ -23,7 +23,14 @@ export const CLIP_LOOKS: { id: ClipLook; label: string }[] = [
 ]
 
 const LOOK_NUMBERS: Record<ClipLook, number> = { outline: 0, duotone: 1, comic: 2, original: 3 }
-const LANE_COLORS = ['#3dff9e', '#2ef2d0', '#c6ff3a']
+/**
+ * Дорожки и кольца одного спокойного цвета: это рамка, а не сигнал.
+ * Яркими остаются только ноты, поэтому взгляд сразу находит, что нажимать.
+ */
+const TRACK_COLOR = '#2fd8cf'
+const LANE_COLORS = [TRACK_COLOR, TRACK_COLOR, TRACK_COLOR]
+const TAP_COLOR = '#ffb52e'
+const SPECIAL_COLOR = '#ff6fa8'
 const LANE_KEYS = ['A', 'S', 'D']
 /** Цвет дорожек на множителях ×1…×4: игра явно меняется, пока серия растёт. */
 const TIER_COLORS = ['#3dff9e', '#2ef2d0', '#9dffc4', '#d9fff0']
@@ -49,10 +56,9 @@ const NOTE_TILT = 0.6
 const PLANE_SQUASH = Math.sin(NOTE_TILT)
 /** Стрелка лежит внутри круга и занимает меньше его ширины. */
 const ARROW_IN_COIN = 0.62
-const STAR_COLOR = '#ffc933'
-const COIN_WITH_ARROW_COLOR = '#ffe14d'
-const ARROW_ON_COIN_COLOR = '#4a3200'
-const FLYING_ARROW_COLOR = '#fff3a8'
+const COIN_WITH_ARROW_COLOR = '#ffffff'
+const ARROW_ON_COIN_COLOR = '#0d4a48'
+const FLYING_ARROW_COLOR = '#ffffff'
 const MAX_FLYING_ARROWS = 6
 const ARROW_FLIGHT_SEC = 0.5
 const MAX_NOTES = 48
@@ -259,7 +265,7 @@ const fanFragment = /* glsl */ `
     float distanceAway = 1.0 / closeness;
     float pulse = smoothstep(0.8, 1.0, fract(distanceAway * 1.6 + uTrackTime * (1.4 + 2.5 * uTension)));
 
-    vec3 laneColor = mix(uLaneColors[lane], uTierColor, 0.3);
+    vec3 laneColor = uLaneColors[lane];
     float fade = smoothstep(0.0, 0.1, closeness);
 
     vec3 color = laneColor * (0.06 + 0.1 * uBeat + 0.28 * pulse);
@@ -276,7 +282,8 @@ const fanFragment = /* glsl */ `
       if (closeness > uBeams[i].y || closeness < uBeams[i].z) continue;
       float width = 0.2 + 0.05 * sin(distanceAway * 9.0 - uTrackTime * 12.0) * uBeamHeld[i];
       float core = 1.0 - smoothstep(width * 0.3, width, fromCenter);
-      vec3 beamColor = mix(laneColor, vec3(1.0), 0.35 + 0.5 * uBeamHeld[i]);
+      // Луч того же цвета, что и обычная нота: это продолжение ноты, а не дорожка
+      vec3 beamColor = mix(vec3(1.0, 0.71, 0.18), vec3(1.0), 0.15 + 0.45 * uBeamHeld[i]);
       color = mix(color, beamColor, core);
       alpha = max(alpha, core * (0.75 + 0.25 * uBeamHeld[i]));
     }
@@ -732,9 +739,9 @@ export class LaneScene {
     this.fanUniforms.uLaneGlow.value[lane] = 1
     this.targets[lane].squash = isPerfect ? 1.22 : 1.12
     this.targets[lane].light.opacity = 1
-    const color = isPerfect ? '#ffffff' : LANE_COLORS[lane]
+    const color = isPerfect ? '#ffffff' : TAP_COLOR
     this.addShockwave(lane, color, clockTime)
-    if (isPerfect) this.addShockwave(lane, LANE_COLORS[lane], clockTime - 0.08)
+    if (isPerfect) this.addShockwave(lane, TAP_COLOR, clockTime - 0.08)
 
     const count = isPerfect ? 14 : 8
     for (let i = 0; i < count; i++) {
@@ -748,7 +755,7 @@ export class LaneScene {
       spark.speedX = Math.cos(angle) * speed
       spark.speedY = Math.sin(angle) * speed
       spark.bornAt = clockTime
-      spark.color.set(i % 3 === 0 ? '#ffffff' : LANE_COLORS[lane])
+      spark.color.set(i % 3 === 0 ? '#ffffff' : TAP_COLOR)
     }
   }
 
@@ -874,12 +881,12 @@ export class LaneScene {
 
       if (note.kind === 'star') {
         this.starNotes.setMatrixAt(starCount, this.helper.matrix)
-        this.starNotes.setColorAt(starCount, this.color.set(STAR_COLOR))
+        this.starNotes.setColorAt(starCount, this.color.set(SPECIAL_COLOR))
         starCount += 1
       } else {
-        let coinColor = LANE_COLORS[note.lane]
+        let coinColor = TAP_COLOR
         if (note.kind === 'swipe') coinColor = COIN_WITH_ARROW_COLOR
-        if (note.kind === 'accent') coinColor = '#ffffff'
+        if (note.kind === 'accent') coinColor = SPECIAL_COLOR
         this.tapNotes.setMatrixAt(tapCount, this.helper.matrix)
         this.tapNotes.setColorAt(tapCount, this.color.set(coinColor))
         tapCount += 1
@@ -958,7 +965,7 @@ export class LaneScene {
       spark.speedX = Math.cos(angle) * 0.7
       spark.speedY = Math.sin(angle) * 1.1
       spark.bornAt = clockTime
-      spark.color.set(LANE_COLORS[note.lane])
+      spark.color.set(TAP_COLOR)
     }
   }
 
