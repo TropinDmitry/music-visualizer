@@ -171,6 +171,35 @@ describe('драматургия песни', () => {
     expect(findSections(steadyTrack, songIntensity(steadyTrack)).length).toBeLessThanOrEqual(3)
   })
 
+  it('короткие выпадения не вырезают ноты, а пробелы не идут кучей', () => {
+    const notes = generateLaneLevel(dramatic, hard)
+    const spaces = notes.filter((note) => note.kind === 'space')
+    for (let i = 1; i < spaces.length; i++) {
+      expect(spaces[i].time - spaces[i - 1].time).toBeGreaterThanOrEqual(8)
+    }
+
+    // Редкий бит с короткими затишьями: ноты должны оставаться на каждом ударе
+    const sparse = new Float32Array(SAMPLE_RATE * 30)
+    addKicks(sparse, 2, 28, 0.8, () => 0.8)
+    const sparseNotes = generateLaneLevel(analyzeAudio(sparse, SAMPLE_RATE), hard)
+    expect(sparseNotes.length).toBeGreaterThan(20)
+  })
+
+  it('в спокойной части лучей больше, чем в мощной', () => {
+    const samples = new Float32Array(SAMPLE_RATE * 60)
+    addKicks(samples, 2, 30, 0.5, () => 0.25)
+    addKicks(samples, 30, 58, 0.5, () => 0.9)
+    for (let i = 30 * SAMPLE_RATE; i < 58 * SAMPLE_RATE; i++) {
+      const t = i / SAMPLE_RATE
+      samples[i] += 0.12 * (Math.sin(2 * Math.PI * 1100 * t) + Math.sin(2 * Math.PI * 6500 * t))
+    }
+    const notes = generateLaneLevel(analyzeAudio(samples, SAMPLE_RATE), hard)
+    const holds = notes.filter((note) => note.kind === 'hold')
+    const calm = holds.filter((note) => note.time < 28).length
+    const strong = holds.filter((note) => note.time > 32).length
+    expect(calm).toBeGreaterThan(strong)
+  })
+
   it('в паузе нот нет, а после неё приходит нота SPACE', () => {
     const notes = generateLaneLevel(dramatic, hard)
     const pause = moments.find((moment) => moment.kind === 'pause')
