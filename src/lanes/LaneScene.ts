@@ -7,11 +7,10 @@ import type { LaneNote } from './level.ts'
  * Графика игры: клип на весь экран, поверх него веер из трёх дорожек,
  * ноты и эффекты попаданий. Логики здесь нет, сцена только рисует.
  *
- * Дорожки выходят из одной точки вверху и расходятся к низу экрана.
- * Положение на дорожке задаёт число «близость»: 0 — точка вверху,
- * 1 — линия нажатия. Настоящая перспектива здесь не нужна: хватает
- * формулы близость = 1 / (1 + расстояние). Вдали нота движется медленно,
- * у линии нажатия резко ускоряется и растёт, как в трёхмерной сцене.
+ * Дорожки идут тугим пучком сверху и плавным изгибом расходятся к низу экрана.
+ * Положение на дорожке задаёт число «близость»: 0 — верх пучка,
+ * 1 — линия нажатия. Формула близость = 1 / (1 + расстояние) даёт ощущение
+ * глубины: вдали нота ползёт медленно, а у кнопки резко ускоряется и растёт.
  */
 
 export type ClipLook = 'outline' | 'duotone' | 'comic' | 'original'
@@ -34,6 +33,11 @@ const VANISH_Y = 0.94
 const HIT_Y = -0.68
 /** Расстояние между центрами дорожек на линии нажатия. */
 const LANE_SPREAD = 0.62
+/** Расстояние между дорожками в пучке наверху. */
+const LANE_BUNDLE = 0.05
+/** Степень изгиба: чем больше, тем дольше дорожки идут вместе. */
+const LANE_BEND = 1.9
+const MAX_BEAMS = 6
 /** Во сколько раз нота вдали меньше, чем у линии нажатия. */
 const DEPTH = 7
 const NOTE_SIZE = 0.42
@@ -197,39 +201,64 @@ const fanFragment = /* glsl */ `
   uniform vec3 uLaneColors[3];
   uniform float uLaneGlow[3];
   uniform float uLaneBad[3];
+  uniform float uBundle;
+  uniform float uBend;
+  uniform vec3 uBeams[6];
+  uniform float uBeamHeld[6];
   varying vec2 vUv;
 
   void main() {
     vec2 p = (vUv * 2.0 - 1.0) * vec2(uViewAspect, 1.0);
-    // Близость к игроку: 0 в точке схода, 1 на линии нажатия
+    // Близость к игроку: 0 вверху пучка, 1 на линии нажатия
     float closeness = (uVanishY - p.y) / (uVanishY - uHitY);
     if (closeness <= 0.0) discard;
 
-    // Делим x на близость, и веер превращается в три ровные полосы
-    float laneCoord = p.x / (uSpread * closeness) + 1.5;
+    // Расстояние между дорожками растёт по степени: отсюда плавный изгиб.
+    // Деление на него превращает кривой веер в три ровные полосы.
+    float spacing = uBundle + (uSpread - uBundle) * pow(closeness, uBend);
+    float laneCoord = p.x / spacing + 1.5;
     if (laneCoord < 0.0 || laneCoord > 3.0) discard;
     int lane = int(min(floor(laneCoord), 2.0));
-    float across = fract(laneCoord);
+    float fromCenter = abs(fract(laneCoord) - 0.5);
 
-    // Расстояние до игрока: обратное к близости, как настоящая глубина
+    // Сглаживаем края на ширину пикселя: иначе тонкие линии вверху рябят
+    float pixel = fwidth(laneCoord);
+    const float TUBE = 0.31;
+    float inside = 1.0 - smoothstep(TUBE - pixel, TUBE + pixel, fromCenter);
+    float rail = 1.0 - smoothstep(0.012, 0.03 + pixel, abs(fromCenter - TUBE));
+    float halo = exp(-max(fromCenter - TUBE, 0.0) * 30.0) * (1.0 - inside);
+
+    // Бегущие блики внутри трубки показывают движение к игроку
     float distanceAway = 1.0 / closeness;
+    float pulse = smoothstep(0.8, 1.0, fract(distanceAway * 1.6 + uTrackTime * 1.4));
 
-    // Поперечные полосы бегут к игроку, поэтому дорожка кажется движущейся
-    float rung = smoothstep(0.86, 1.0, fract(distanceAway * 2.2 + uTrackTime * 1.6));
+    vec3 laneColor = mix(uLaneColors[lane], uTierColor, 0.5);
+    float fade = smoothstep(0.0, 0.1, closeness);
 
-    vec3 laneColor = mix(uLaneColors[lane], uTierColor, 0.55);
-    float edge = smoothstep(0.42, 0.5, abs(across - 0.5));
-    float fade = smoothstep(0.02, 0.3, closeness);
+    vec3 color = laneColor * (0.06 + 0.1 * uBeat + 0.28 * pulse);
+    float alpha = inside * uContrast * 0.85 * fade;
 
-    // Тёмная подложка отделяет дорожку от клипа, яркость настраивается в меню
-    float backing = uContrast * 0.8 * fade;
-    vec3 color = laneColor * (0.1 + 0.14 * uBeat + 0.35 * rung * fade);
-    color += laneColor * edge * 1.1;
-    color += laneColor * uLaneGlow[lane] * (0.25 + 0.65 * smoothstep(0.2, 1.0, closeness));
-    color = mix(color, vec3(1.0, 0.22, 0.3), uLaneBad[lane] * 0.75);
+    color = mix(color, laneColor * 1.25 + vec3(0.2), rail);
+    alpha = max(alpha, rail * fade);
+    color = mix(color, laneColor, halo * (1.0 - rail));
+    alpha = max(alpha, halo * (0.3 + 0.25 * uBeat) * fade);
 
-    float alpha = max(backing, max(edge * fade, uLaneGlow[lane] * 0.75 * fade));
-    alpha = max(alpha, uLaneBad[lane] * 0.6 * fade);
+    // Лучи нот с удержанием: сплошной поток света по оси трубки
+    for (int i = 0; i < 6; i++) {
+      if (int(uBeams[i].x) != lane) continue;
+      if (closeness > uBeams[i].y || closeness < uBeams[i].z) continue;
+      float width = 0.2 + 0.05 * sin(distanceAway * 9.0 - uTrackTime * 12.0) * uBeamHeld[i];
+      float core = 1.0 - smoothstep(width * 0.3, width, fromCenter);
+      vec3 beamColor = mix(laneColor, vec3(1.0), 0.35 + 0.5 * uBeamHeld[i]);
+      color = mix(color, beamColor, core);
+      alpha = max(alpha, core * (0.75 + 0.25 * uBeamHeld[i]));
+    }
+
+    color += laneColor * uLaneGlow[lane] * inside * (0.3 + 0.7 * closeness);
+    alpha = max(alpha, uLaneGlow[lane] * 0.7 * inside * fade);
+    color = mix(color, vec3(1.0, 0.22, 0.3), uLaneBad[lane] * 0.75 * inside);
+    alpha = max(alpha, uLaneBad[lane] * 0.6 * inside * fade);
+
     gl_FragColor = vec4(color, alpha);
   }
 `
@@ -276,13 +305,15 @@ const noteFragment = /* glsl */ `
   }
 `
 
-function createNoteMaterial(color: string): THREE.ShaderMaterial {
+function createNoteMaterial(color: string, useDepth = true): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     uniforms: { uColor: { value: colorVector(color) }, uOpacity: { value: 1 } },
     vertexShader: noteVertex,
     fragmentShader: noteFragment,
     // Прозрачный список рисуется по renderOrder, поэтому ноты лягут поверх дорожек
     transparent: true,
+    depthTest: useDepth,
+    depthWrite: useDepth,
   })
 }
 
@@ -345,6 +376,13 @@ function createKeyTexture(letter: string): THREE.CanvasTexture {
   return texture
 }
 
+/** Лучи передаются в шейдер как (дорожка, ближний край, дальний край); -1 — луча нет. */
+function createEmptyBeams(): THREE.Vector3[] {
+  const beams: THREE.Vector3[] = []
+  for (let i = 0; i < MAX_BEAMS; i++) beams.push(new THREE.Vector3(-1, 0, 0))
+  return beams
+}
+
 function colorVector(hex: string): THREE.Vector3 {
   const value = parseInt(hex.slice(1), 16)
   return new THREE.Vector3(((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255)
@@ -352,6 +390,8 @@ function colorVector(hex: string): THREE.Vector3 {
 
 interface Target {
   group: THREE.Group
+  /** Свечение в середине кнопки: вспыхивает на попадании. */
+  light: THREE.MeshBasicMaterial
   /** Текущий масштаб: на нажатии падает и пружинит обратно к 1. */
   squash: number
   /** Сдвиг в сторону на промахе: круг вздрагивает. */
@@ -414,6 +454,10 @@ export class LaneScene {
     uLaneColors: { value: LANE_COLORS.map(colorVector) },
     uLaneGlow: { value: [0, 0, 0] },
     uLaneBad: { value: [0, 0, 0] },
+    uBundle: { value: LANE_BUNDLE },
+    uBend: { value: LANE_BEND },
+    uBeams: { value: createEmptyBeams() },
+    uBeamHeld: { value: new Array(MAX_BEAMS).fill(0) },
   }
   private readonly tapNotes: THREE.InstancedMesh
   private readonly swipeNotes: THREE.InstancedMesh
@@ -422,7 +466,6 @@ export class LaneScene {
   private readonly flyingArrows: FlyingArrow[] = []
   private readonly sparkMesh: THREE.InstancedMesh
   private readonly fanGroup = new THREE.Group()
-  private readonly hitLine: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>
   private readonly targets: Target[] = []
   private readonly sparks: Spark[] = []
   private readonly shockwaves: Shockwave[] = []
@@ -445,14 +488,6 @@ export class LaneScene {
     const fan = this.createScreenQuad(fanFragment, this.fanUniforms, true)
     this.fanGroup.add(fan)
     this.scene.add(this.fanGroup)
-
-    this.hitLine = new THREE.Mesh(
-      new THREE.PlaneGeometry(1, 0.012),
-      new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.8, depthTest: false }),
-    )
-    this.hitLine.position.y = HIT_Y
-    this.hitLine.renderOrder = 1
-    this.scene.add(this.hitLine)
 
     for (let lane = 0; lane < 3; lane++) this.targets.push(this.createTarget(lane))
 
@@ -538,30 +573,41 @@ export class LaneScene {
     return quad
   }
 
-  /** Круг-цель: кольцо дорожки, тёмная сердцевина и буква клавиши. */
+  /**
+   * Кнопка внизу дорожки: массивное кольцо, тёмное дно, светящаяся середина и
+   * буква клавиши. Вся группа наклонена так же, как ноты, поэтому лежит в той
+   * же плоскости.
+   */
   private createTarget(lane: number): Target {
     const group = new THREE.Group()
     group.position.y = HIT_Y
-    group.renderOrder = 2
+    group.rotation.x = NOTE_TILT - Math.PI / 2
 
-    const core = new THREE.Mesh(
-      new THREE.CircleGeometry(0.135, 48),
-      new THREE.MeshBasicMaterial({ color: '#04201a', transparent: true, opacity: 0.75, depthTest: false }),
+    const base = new THREE.Mesh(
+      new THREE.CircleGeometry(0.19, 48),
+      new THREE.MeshBasicMaterial({ color: '#031311', transparent: true, opacity: 0.9, depthTest: false }),
     )
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.135, 0.175, 48),
-      new THREE.MeshBasicMaterial({ color: LANE_COLORS[lane], depthTest: false }),
-    )
+    const light = new THREE.MeshBasicMaterial({
+      color: LANE_COLORS[lane],
+      transparent: true,
+      opacity: 0.16,
+      depthTest: false,
+      depthWrite: false,
+    })
+    const glow = new THREE.Mesh(new THREE.CircleGeometry(0.15, 48), light)
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.175, 0.04, 16, 64), createNoteMaterial(LANE_COLORS[lane], false))
     const label = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.17, 0.17),
+      new THREE.PlaneGeometry(0.15, 0.15),
       new THREE.MeshBasicMaterial({ map: createKeyTexture(LANE_KEYS[lane]), transparent: true, depthTest: false }),
     )
-    for (const mesh of [core, ring, label]) {
-      mesh.renderOrder = 2
+    let order = 2
+    for (const mesh of [base, glow, ring, label]) {
+      mesh.renderOrder = order
+      order += 0.1
       group.add(mesh)
     }
     this.scene.add(group)
-    return { group, squash: 1, jolt: 0 }
+    return { group, light, squash: 1, jolt: 0 }
   }
 
   setSize(width: number, height: number): void {
@@ -574,7 +620,6 @@ export class LaneScene {
     this.spread = Math.min(LANE_SPREAD, (aspect * 0.8) / 1.5)
     this.fanUniforms.uSpread.value = this.spread
     this.sharedUniforms.uViewAspect.value = aspect
-    this.hitLine.scale.x = this.spread * 3
   }
 
   /** Подключает клип как текстуру. null убирает его и возвращает полёт сквозь космос. */
@@ -614,6 +659,15 @@ export class LaneScene {
     return (lane - 1) * this.spread
   }
 
+  /** Расстояние между дорожками на этой глубине: та же формула, что в шейдере. */
+  private spacingAt(closeness: number): number {
+    return LANE_BUNDLE + (this.spread - LANE_BUNDLE) * Math.pow(closeness, LANE_BEND)
+  }
+
+  private closenessAt(remaining: number, approachSec: number): number {
+    return 1 / (1 + (Math.max(remaining, -approachSec * 0.1) / approachSec) * (DEPTH - 1))
+  }
+
   /** Какая дорожка под курсором. x в экранных единицах: 0 — центр, половина высоты — 1. */
   laneAt(x: number): number {
     if (x < -this.spread / 2) return 0
@@ -629,7 +683,8 @@ export class LaneScene {
   /** Попадание: луч по дорожке, волна и искры. Точное попадание заметно сильнее. */
   hitEffect(lane: number, isPerfect: boolean, clockTime: number): void {
     this.fanUniforms.uLaneGlow.value[lane] = 1
-    this.targets[lane].squash = isPerfect ? 1.3 : 1.15
+    this.targets[lane].squash = isPerfect ? 1.22 : 1.12
+    this.targets[lane].light.opacity = 1
     const color = isPerfect ? '#ffffff' : LANE_COLORS[lane]
     this.addShockwave(lane, color, clockTime)
     if (isPerfect) this.addShockwave(lane, LANE_COLORS[lane], clockTime - 0.08)
@@ -676,6 +731,7 @@ export class LaneScene {
     clockTime: number,
     multiplier: number,
     showLanes: boolean,
+    holdingNotes: (LaneNote | null)[],
   ): void {
     const seconds = Math.min(clockTime - this.lastRenderAt, 0.1)
     this.lastRenderAt = clockTime
@@ -690,8 +746,10 @@ export class LaneScene {
       this.clipUniforms.uTexel.value.set(1 / video.videoWidth, 1 / video.videoHeight)
     }
 
-    this.updateLanes(pressedLanes, features.beatPulse, seconds)
+    this.updateLanes(pressedLanes, features.beatPulse, seconds, holdingNotes)
     this.updateNotes(features.time, notes, firstNote, judged, approachSec)
+    this.updateBeams(features.time, notes, firstNote, judged, approachSec, holdingNotes)
+    this.emitHoldSparks(holdingNotes, clockTime)
     this.updateFlyingArrows(clockTime)
     this.updateSparks(clockTime)
     this.updateShockwaves(clockTime)
@@ -701,13 +759,19 @@ export class LaneScene {
     if (showLanes) this.renderer.render(this.scene, this.camera)
   }
 
-  private updateLanes(pressedLanes: boolean[], beat: number, seconds: number): void {
+  private updateLanes(
+    pressedLanes: boolean[],
+    beat: number,
+    seconds: number,
+    holdingNotes: (LaneNote | null)[],
+  ): void {
     // Плавное затухание, не зависящее от частоты кадров
     const fade = Math.exp(-seconds * 7)
     const spring = 1 - Math.exp(-seconds * 18)
 
     for (let lane = 0; lane < 3; lane++) {
-      const held = pressedLanes[lane] ? 0.35 : 0
+      const isHolding = holdingNotes[lane] !== null
+      const held = isHolding ? 0.8 : pressedLanes[lane] ? 0.35 : 0
       this.fanUniforms.uLaneGlow.value[lane] = Math.max(held, this.fanUniforms.uLaneGlow.value[lane] * fade)
       this.fanUniforms.uLaneBad.value[lane] *= fade
 
@@ -716,7 +780,8 @@ export class LaneScene {
       target.squash += (restScale - target.squash) * spring
       target.jolt *= fade
       target.group.position.x = this.laneX(lane) + Math.sin(target.jolt * 18) * 0.03 * target.jolt
-      target.group.scale.set(target.squash, target.squash * PLANE_SQUASH, 1)
+      target.group.scale.setScalar(target.squash)
+      target.light.opacity = Math.max(isHolding ? 0.85 : pressedLanes[lane] ? 0.5 : 0.16, target.light.opacity * fade)
     }
   }
 
@@ -739,10 +804,11 @@ export class LaneScene {
       if (remaining > approachSec) break
       if (judged.has(note.id)) continue
 
-      const closeness = 1 / (1 + (remaining / approachSec) * (DEPTH - 1))
-      const x = this.laneX(note.lane) * closeness
+      const closeness = this.closenessAt(remaining, approachSec)
+      const spacing = this.spacingAt(closeness)
+      const x = (note.lane - 1) * spacing
       const y = VANISH_Y + (HIT_Y - VANISH_Y) * closeness
-      const size = NOTE_SIZE * closeness
+      const size = NOTE_SIZE * (spacing / this.spread)
 
       // Тень лежит на дорожке чуть ниже ноты и сплющена так же, как сама нота
       this.helper.position.set(x, y - size * 0.1, 0)
@@ -793,6 +859,57 @@ export class LaneScene {
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
     }
     this.helper.rotation.order = 'XYZ' // искры и волны ждут обычный порядок поворотов
+  }
+
+  /** Передаёт в шейдер дорожек лучи видимых нот с удержанием. */
+  private updateBeams(
+    time: number,
+    notes: LaneNote[],
+    firstNote: number,
+    judged: Set<number>,
+    approachSec: number,
+    holdingNotes: (LaneNote | null)[],
+  ): void {
+    const beams = this.fanUniforms.uBeams.value
+    const heldFlags = this.fanUniforms.uBeamHeld.value
+    let count = 0
+
+    for (const note of holdingNotes) {
+      if (!note || count >= MAX_BEAMS) continue
+      const end = note.time + (note.duration ?? 0)
+      beams[count].set(note.lane, 1.05, this.closenessAt(end - time, approachSec))
+      heldFlags[count] = 1
+      count += 1
+    }
+
+    for (let i = firstNote; i < notes.length && count < MAX_BEAMS; i++) {
+      const note = notes[i]
+      const remaining = note.time - time
+      if (remaining > approachSec) break
+      if (note.kind !== 'hold' || judged.has(note.id)) continue
+      const end = remaining + (note.duration ?? 0)
+      beams[count].set(note.lane, this.closenessAt(remaining, approachSec), this.closenessAt(end, approachSec))
+      heldFlags[count] = 0
+      count += 1
+    }
+
+    for (let i = count; i < MAX_BEAMS; i++) beams[i].set(-1, 0, 0)
+  }
+
+  /** Пока луч зажат, из кнопки непрерывно бьют искры. */
+  private emitHoldSparks(holdingNotes: (LaneNote | null)[], clockTime: number): void {
+    for (const note of holdingNotes) {
+      if (!note) continue
+      const spark = this.sparks[this.nextSpark]
+      this.nextSpark = (this.nextSpark + 1) % MAX_SPARKS
+      const angle = Math.PI * (0.2 + 0.6 * Math.random())
+      spark.x = this.laneX(note.lane)
+      spark.y = HIT_Y
+      spark.speedX = Math.cos(angle) * 0.7
+      spark.speedY = Math.sin(angle) * 1.1
+      spark.bornAt = clockTime
+      spark.color.set(LANE_COLORS[note.lane])
+    }
   }
 
   private updateFlyingArrows(clockTime: number): void {

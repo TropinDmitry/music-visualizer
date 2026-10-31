@@ -65,6 +65,11 @@ export class SoundEffects {
     this.pluck(now + 0.07, 880, 0.55, 0.16)
   }
 
+  /** Луч удержан до конца: одна тёплая нота. */
+  holdDone(): void {
+    this.pluck(this.context.currentTime, 523.3, 0.5, 0.14)
+  }
+
   /** Новый множитель: одна нота, чем множитель выше, тем она выше. */
   multiplierUp(multiplier: number): void {
     this.pluck(this.context.currentTime, 330 * Math.pow(2, (multiplier - 2) / 6), 0.5, 0.14)

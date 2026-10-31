@@ -12,6 +12,8 @@ import {
   pressLane,
   pressSwipe,
   rank,
+  releaseLane,
+  starRating,
   stepLanes,
 } from './rules.ts'
 
@@ -37,8 +39,10 @@ describe('generateLaneLevel', () => {
       const notes = generateLaneLevel(analysis, difficulty)
       expect(new Set(notes.map((note) => note.lane)).size).toBe(3)
       for (let i = 2; i < notes.length; i++) {
+        // Длинная пауза после луча разрывает серию, поэтому здесь её не считаем
+        const isContinuous = notes[i].time - notes[i - 2].time < 0.9
         const sameThree = notes[i].lane === notes[i - 1].lane && notes[i].lane === notes[i - 2].lane
-        expect(sameThree).toBe(false)
+        expect(isContinuous && sameThree).toBe(false)
       }
     }
   })
@@ -53,6 +57,22 @@ describe('generateLaneLevel', () => {
     const stars = notes.filter((note) => note.kind === 'star')
     expect(stars.length).toBeGreaterThan(0)
     expect(stars.length).toBeLessThan(notes.length / 10)
+  })
+
+  it('лучи есть на всех сложностях, и под лучом на его дорожке нет нот', () => {
+    for (const difficulty of DIFFICULTIES) {
+      const notes = generateLaneLevel(analysis, difficulty)
+      const holds = notes.filter((note) => note.kind === 'hold')
+      expect(holds.length).toBeGreaterThan(0)
+      for (const hold of holds) {
+        const end = hold.time + (hold.duration ?? 0)
+        expect(hold.duration).toBeGreaterThan(0.7)
+        for (const note of notes) {
+          const isUnderBeam = note.time > hold.time && note.time < end
+          expect(isUnderBeam && note.lane === hold.lane).toBe(false)
+        }
+      }
+    }
   })
 
   it('в тишине нот нет', () => {
@@ -106,6 +126,44 @@ describe('правила', () => {
     const event = pressLane(game, 1, 2)
     expect(event?.kind).toBe('star')
     expect(event?.points).toBe(500)
+  })
+
+  it('луч, удержанный до конца, приносит очки и продлевает серию', () => {
+    const notes: LaneNote[] = [{ id: 0, time: 1, lane: 1, kind: 'hold', direction: 0, duration: 1 }]
+    const game = createLaneGame(notes, easy)
+    pressLane(game, 1, 1)
+    expect(game.holds[1]).not.toBeNull()
+    stepLanes(game, 1.5)
+    const scoreInMiddle = game.score
+    expect(scoreInMiddle).toBeGreaterThan(250)
+    const events = stepLanes(game, 2)
+    expect(events.map((event) => event.type)).toEqual(['holdDone'])
+    expect(game.holds[1]).toBeNull()
+    expect(game.combo).toBe(2)
+    expect(game.score).toBeGreaterThan(scoreInMiddle)
+  })
+
+  it('отпущенный раньше времени луч обрывает серию', () => {
+    const notes: LaneNote[] = [{ id: 0, time: 1, lane: 0, kind: 'hold', direction: 0, duration: 2 }]
+    const game = createLaneGame(notes, easy)
+    pressLane(game, 1, 0)
+    expect(releaseLane(game, 1.5, 0)?.type).toBe('holdBroken')
+    expect(game.combo).toBe(0)
+    expect(releaseLane(game, 1.6, 0)).toBeNull()
+  })
+
+  it('отпустить чуть раньше конца луча можно без штрафа', () => {
+    const notes: LaneNote[] = [{ id: 0, time: 1, lane: 0, kind: 'hold', direction: 0, duration: 1 }]
+    const game = createLaneGame(notes, easy)
+    pressLane(game, 1, 0)
+    expect(releaseLane(game, 1.9, 0)?.type).toBe('holdDone')
+  })
+
+  it('звёзды за партию зависят от точности', () => {
+    const game = createLaneGame(tapRow(10), easy)
+    for (let i = 0; i < 8; i++) pressLane(game, i + 1, 0)
+    stepLanes(game, 100)
+    expect(starRating(game)).toBe(1)
   })
 
   it('событие стрелки сообщает направление для отлёта', () => {

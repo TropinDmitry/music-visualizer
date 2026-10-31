@@ -7,8 +7,11 @@ import { pickNoteFrames } from '../game/level.ts'
  * выглядят случайными.
  */
 
-/** tap — круг, swipe — стрелка, star — редкая золотая нота с удвоенными очками. */
-export type NoteKind = 'tap' | 'swipe' | 'star'
+/**
+ * tap — круг, swipe — стрелка, star — редкая золотая нота с удвоенными очками,
+ * hold — нота с лучом: клавишу надо зажать и держать до конца луча.
+ */
+export type NoteKind = 'tap' | 'swipe' | 'star' | 'hold'
 
 export interface LaneNote {
   id: number
@@ -17,6 +20,8 @@ export interface LaneNote {
   kind: NoteKind
   /** Только у свайпа: -1 влево, 1 вправо. */
   direction: number
+  /** Только у ноты с лучом: сколько секунд держать. */
+  duration?: number
 }
 
 export type DifficultyId = 'easy' | 'normal' | 'hard'
@@ -38,6 +43,12 @@ export const DIFFICULTIES: Difficulty[] = [
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
 const STAR_EVERY = 17
+/** Примерно через столько обычных нот появляется нота с лучом. */
+const HOLD_EVERY = 14
+const HOLD_MIN_SEC = 0.9
+const HOLD_MAX_SEC = 3
+/** Луч заканчивается чуть раньше следующей ноты, чтобы руке хватило времени. */
+const HOLD_END_GAP_SEC = 0.1
 
 export function findDifficulty(id: DifficultyId): Difficulty {
   for (const difficulty of DIFFICULTIES) {
@@ -68,7 +79,51 @@ export function generateLaneLevel(analysis: AudioAnalysis, difficulty: Difficult
       direction: isSwipe ? swipeDirection : 0,
     })
   }
-  return notes
+  return addHolds(notes, difficulty)
+}
+
+/**
+ * Превращает часть кругов в ноты с лучом. Луч тянется до следующего удара,
+ * поэтому конец удержания попадает в музыку. Ноты под лучом убираем: на сложной
+ * сложности остаются только соседние дорожки, остальным руку нужно освободить.
+ */
+function addHolds(notes: LaneNote[], difficulty: Difficulty): LaneNote[] {
+  const result: LaneNote[] = []
+  let tapsSinceHold = 0
+  let i = 0
+
+  while (i < notes.length) {
+    const note = notes[i]
+    tapsSinceHold += 1
+    const endIndex = tapsSinceHold >= HOLD_EVERY && note.kind === 'tap' ? findHoldEnd(notes, i) : -1
+
+    if (endIndex === -1) {
+      result.push({ ...note, id: result.length })
+      i += 1
+      continue
+    }
+
+    const duration = notes[endIndex].time - note.time - HOLD_END_GAP_SEC
+    result.push({ ...note, id: result.length, kind: 'hold', duration })
+    if (difficulty.id === 'hard') {
+      for (let j = i + 1; j < endIndex; j++) {
+        if (notes[j].lane !== note.lane) result.push({ ...notes[j], id: result.length })
+      }
+    }
+    tapsSinceHold = 0
+    i = endIndex
+  }
+  return result
+}
+
+/** Индекс ноты, на которой закончится луч, или -1, если подходящей нет. */
+function findHoldEnd(notes: LaneNote[], start: number): number {
+  for (let j = start + 1; j < notes.length; j++) {
+    const gap = notes[j].time - notes[start].time
+    if (gap > HOLD_MAX_SEC) return -1
+    if (gap >= HOLD_MIN_SEC) return j
+  }
+  return -1
 }
 
 /** Для каждого удара считает «центр тяжести» спектра и делит удары на три равные группы. */
