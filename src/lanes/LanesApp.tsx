@@ -83,6 +83,13 @@ interface GameResult {
   misses: number
 }
 
+/** Палец или кнопка мыши на экране. */
+interface ActiveTouch {
+  lane: number
+  startX: number
+  hasSwiped: boolean
+}
+
 const EMPTY_HUD: Hud = {
   score: 0,
   combo: 0,
@@ -99,6 +106,8 @@ const NO_HOLDS = [null, null, null]
 /** Если картинка разошлась со звуком на столько секунд, подтягиваем её. */
 const VIDEO_MAX_DRIFT_SEC = 0.15
 const LOW_ENERGY = 0.3
+/** Сдвиг пальца, после которого касание считается смахиванием. */
+const SWIPE_MIN_PX = 35
 /** На сколько радиан поворачивается оттенок клипа от начала песни до конца. */
 const COLOR_DRIFT_RADIANS = 2
 const MAX_POPUPS = 6
@@ -156,7 +165,8 @@ export function LanesApp() {
   const nextIdRef = useRef(1)
   const soundsRef = useRef<SoundEffects | null>(null)
   const lastMultiplierRef = useRef(1)
-  const pointerLaneRef = useRef<number | null>(null)
+  /** Активные касания: на телефоне пальцев может быть несколько сразу. */
+  const touchesRef = useRef(new Map<number, ActiveTouch>())
   const momentsRef = useRef<Moment[]>([])
   const playedImpactsRef = useRef(new Set<Moment>())
   const eventHandlerRef = useRef<(event: LaneEvent | null) => void>(() => {})
@@ -475,7 +485,7 @@ export function LanesApp() {
     }
   }, [])
 
-  /** Клик по экрану тоже нажимает дорожку: она выбирается по положению курсора. */
+  /** Клик или касание нажимает дорожку под пальцем. */
   const handlePointerDown = (event: PointerEvent) => {
     const canvas = canvasRef.current
     const scene = sceneRef.current
@@ -483,17 +493,34 @@ export function LanesApp() {
     const box = canvas.getBoundingClientRect()
     const x = (event.clientX - (box.left + box.width / 2)) / (box.height / 2)
     const lane = scene.laneAt(x)
-    pointerLaneRef.current = lane
+    touchesRef.current.set(event.pointerId, { lane, startX: event.clientX, hasSwiped: false })
     pressedLanesRef.current[lane] = true
     handlersRef.current.lane(lane)
   }
 
-  const handlePointerUp = () => {
-    const lane = pointerLaneRef.current
-    if (lane === null) return
-    pointerLaneRef.current = null
-    pressedLanesRef.current[lane] = false
-    handlersRef.current.release(lane)
+  /** Смахивание в сторону отбивает стрелку: на телефоне нет клавиш ← и →. */
+  const handlePointerMove = (event: PointerEvent) => {
+    const touch = touchesRef.current.get(event.pointerId)
+    if (!touch || touch.hasSwiped) return
+    const distance = event.clientX - touch.startX
+    if (Math.abs(distance) < SWIPE_MIN_PX) return
+    touch.hasSwiped = true
+    handlersRef.current.swipe(Math.sign(distance))
+  }
+
+  const handlePointerUp = (event: PointerEvent) => {
+    const touch = touchesRef.current.get(event.pointerId)
+    if (!touch) return
+    touchesRef.current.delete(event.pointerId)
+
+    // Дорожка остаётся нажатой, пока на ней есть другой палец
+    let isStillHeld = false
+    for (const other of touchesRef.current.values()) {
+      if (other.lane === touch.lane) isStillHeld = true
+    }
+    if (isStillHeld) return
+    pressedLanesRef.current[touch.lane] = false
+    handlersRef.current.release(touch.lane)
   }
 
   const attachClip = (file: File) => {
@@ -557,7 +584,13 @@ export function LanesApp() {
   const trackProgress = duration > 0 ? Math.min(1, hud.time / duration) : 0
 
   return (
-    <div className="game" onPointerDown={handlePointerDown} onPointerUp={handlePointerUp}>
+    <div
+      className="game"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+    >
       <canvas className="game-canvas" ref={canvasRef} />
       {/* Звук идёт через Web Audio, а видео только даёт кадры, поэтому оно без звука */}
       <video ref={videoRef} src={clipUrl || undefined} muted playsInline preload="auto" hidden />
@@ -576,10 +609,10 @@ export function LanesApp() {
 
           <div className="side-pill side-left">
             {/* key заново запускает анимацию на каждой ноте */}
-            <strong className="pill-main" key={hud.multiplier}>
+            <strong className="pill-main" key={`multiplier-${hud.multiplier}`}>
               ×{hud.multiplier}
             </strong>
-            <span className="pill-note" key={hud.combo}>
+            <span className="pill-note" key={`combo-${hud.combo}`}>
               {hud.combo} подряд
             </span>
             <div className="multiplier-bar">
@@ -613,7 +646,7 @@ export function LanesApp() {
             </span>
           ))}
 
-          <div className="hud-hint">A S D или клик по дорожке · ← → — стрелки · Esc — пауза</div>
+          <div className="hud-hint">A S D или нажатие на дорожку · ← → или смахивание — стрелки · Esc — пауза</div>
         </div>
       )}
 
@@ -804,8 +837,8 @@ export function LanesApp() {
           </button>
 
           <ul className="legend">
-            <li>Круг: клавиша дорожки A, S, D или клик</li>
-            <li>Жёлтая стрелка: ← или → в ту же сторону</li>
+            <li>Круг: клавиша A, S, D или нажатие на дорожку</li>
+            <li>Жёлтая стрелка: ← или → либо смахивание в ту же сторону</li>
             <li>Золотая звезда: как круг, очки ×2</li>
             <li>Круг с лучом: зажмите и держите до конца</li>
             <li>Белая пара: две клавиши сразу на взрыве песни</li>

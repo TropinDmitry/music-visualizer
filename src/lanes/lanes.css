@@ -290,3 +290,26 @@
   bottom: 6px;
   text-shadow: 0 0 6px #000;
 }
+
+/* На телефоне меню длиннее экрана: «Старт» всегда под рукой */
+@media (max-width: 720px) {
+  .menu .start-button {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+  }
+
+  /* Подсказка про клавиши на телефоне не нужна */
+  .hud-hint {
+    display: none;
+  }
+
+  .side-pill {
+    width: 84px;
+    padding: 6px 8px;
+  }
+
+  .pill-main {
+    font-size: 22px;
+  }
+}

@@ -827,7 +827,7 @@ export class LaneScene {
       target.squash += (restScale - target.squash) * spring
       target.jolt *= fade
       target.group.position.x = this.laneX(lane) + Math.sin(target.jolt * 18) * 0.03 * target.jolt
-      target.group.scale.setScalar(target.squash)
+      target.group.scale.setScalar(target.squash * (this.spread / LANE_SPREAD))
       target.light.opacity = Math.max(isHolding ? 0.85 : pressedLanes[lane] ? 0.5 : 0.16, target.light.opacity * fade)
     }
   }
@@ -855,7 +855,8 @@ export class LaneScene {
       const spacing = this.spacingAt(closeness)
       const x = (note.lane - 1) * spacing
       const y = VANISH_Y + (HIT_Y - VANISH_Y) * closeness
-      const size = NOTE_SIZE * (spacing / this.spread)
+      // Размер зависит от расстояния между дорожками, поэтому в узком окне ноты меньше
+      const size = NOTE_SIZE * (spacing / LANE_SPREAD)
 
       // Тень лежит на дорожке чуть ниже ноты и сплющена так же, как сама нота
       this.helper.position.set(x, y - size * 0.1, 0)
@@ -973,7 +974,7 @@ export class LaneScene {
       const heading = arrow.direction < 0 ? Math.PI : 0
       arrow.mesh.position.set(arrow.startX + arrow.direction * flight * 3.2, HIT_Y, 0.1)
       arrow.mesh.rotation.set(NOTE_TILT, heading, 0)
-      arrow.mesh.scale.setScalar(NOTE_SIZE * ARROW_IN_COIN * (1 + 0.9 * age))
+      arrow.mesh.scale.setScalar(NOTE_SIZE * ARROW_IN_COIN * (this.spread / LANE_SPREAD) * (1 + 0.9 * age))
       arrow.mesh.material.uniforms.uOpacity.value = 1 - age * age
     }
   }
@@ -1010,7 +1011,7 @@ export class LaneScene {
         wave.mesh.material.opacity = 0
         continue
       }
-      const waveSize = 0.17 + 0.3 * age
+      const waveSize = (0.17 + 0.3 * age) * (this.spread / LANE_SPREAD)
       wave.mesh.scale.set(waveSize, waveSize * PLANE_SQUASH, 1)
       wave.mesh.material.opacity = 1 - age
     }
