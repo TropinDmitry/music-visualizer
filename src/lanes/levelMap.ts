@@ -1,6 +1,7 @@
 import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { audioBufferToMono, decodeAudioFile } from '../audio/loadAudio.ts'
 import { runAnalysisInWorker } from '../audio/runAnalysis.ts'
+import { compareTake, type Press } from './compareTake.ts'
 import type { SongPart } from './structure.ts'
 import { DIFFICULTIES, generateLaneLevel, type LaneNote, type LevelTrace } from './level.ts'
 
@@ -58,10 +59,31 @@ const funnel = document.querySelector<HTMLElement>('#funnel')!
 const legend = document.querySelector<HTMLElement>('#legend')!
 const overview = document.querySelector<HTMLCanvasElement>('#overview')!
 const detail = document.querySelector<HTMLCanvasElement>('#detail')!
+const recordButton = document.querySelector<HTMLButtonElement>('#record')!
+const saveButton = document.querySelector<HTMLButtonElement>('#save')!
+const rateSelect = document.querySelector<HTMLSelectElement>('#rate')!
+const report = document.querySelector<HTMLElement>('#report')!
 const audio = new Audio()
+
+/** Какая дорожка рентгена у какой клавиши. Стрелки и пробел рисуем отдельной строкой. */
+const KEY_ROWS: Record<string, number> = { a: 0, s: 1, d: 2, left: 3, right: 3, space: 3 }
+const KEY_NAMES: Record<string, string> = {
+  KeyA: 'a',
+  KeyS: 's',
+  KeyD: 'd',
+  ArrowLeft: 'left',
+  ArrowRight: 'right',
+  Space: 'space',
+}
 
 let state: MapState | null = null
 let viewStart = 0
+let trackName = ''
+let presses: Press[] = []
+let isRecording = false
+let recordingFrom = 0
+let pressesBefore = 0
+const heldKeys = new Map<string, Press>()
 
 for (const difficulty of DIFFICULTIES) {
   difficultySelect.add(new Option(difficulty.label, difficulty.id))
@@ -99,6 +121,104 @@ overview.addEventListener('click', (event) => {
   drawAll()
 })
 window.addEventListener('resize', drawAll)
+rateSelect.addEventListener('change', () => {
+  audio.playbackRate = Number(rateSelect.value)
+})
+recordButton.addEventListener('click', () => {
+  recordButton.blur()
+  if (isRecording) stopRecording()
+  else startRecording()
+})
+saveButton.addEventListener('click', saveTake)
+audio.addEventListener('ended', () => {
+  if (isRecording) stopRecording()
+})
+window.addEventListener('keydown', (event) => {
+  const key = KEY_NAMES[event.code]
+  if (!isRecording || !key) return
+  // Иначе пробел нажмёт кнопку, а стрелки переключат список
+  event.preventDefault()
+  if (event.repeat || heldKeys.has(key)) return
+  const press: Press = { time: audio.currentTime, key, duration: 0 }
+  heldKeys.set(key, press)
+  presses.push(press)
+})
+window.addEventListener('keyup', (event) => {
+  const key = KEY_NAMES[event.code]
+  const press = key ? heldKeys.get(key) : undefined
+  if (!press) return
+  press.duration = audio.currentTime - press.time
+  heldKeys.delete(key)
+})
+
+function startRecording(): void {
+  recordingFrom = audio.currentTime
+  // Переигранный отрезок заменяем при остановке: новые нажатия идут в конце списка
+  pressesBefore = presses.length
+  isRecording = true
+  recordButton.textContent = 'Остановить запись'
+  recordButton.classList.add('is-on')
+  void audio.play()
+}
+
+function stopRecording(): void {
+  const to = audio.currentTime
+  isRecording = false
+  audio.pause()
+  recordButton.textContent = 'Записать нажатия'
+  recordButton.classList.remove('is-on')
+  const isOldTake = (press: Press) => press.time < recordingFrom || press.time > to
+  const fresh = presses.slice(pressesBefore)
+  presses = [...presses.slice(0, pressesBefore).filter(isOldTake), ...fresh]
+  presses.sort((a, b) => a.time - b.time)
+  storeTake()
+  showReport()
+  drawAll()
+}
+
+function storeTake(): void {
+  try {
+    localStorage.setItem(`take:${trackName}`, JSON.stringify(presses))
+  } catch {
+    // Без хранилища запись остаётся на странице, её можно скачать
+  }
+}
+
+function restoreTake(): void {
+  presses = []
+  try {
+    const saved = localStorage.getItem(`take:${trackName}`)
+    if (saved) presses = JSON.parse(saved) as Press[]
+  } catch {
+    presses = []
+  }
+}
+
+function saveTake(): void {
+  const link = document.createElement('a')
+  const take = { track: trackName, difficulty: difficultySelect.value, presses }
+  link.href = URL.createObjectURL(new Blob([JSON.stringify(take)], { type: 'application/json' }))
+  link.download = `запись ${trackName}.json`
+  link.click()
+  URL.revokeObjectURL(link.href)
+}
+
+function showReport(): void {
+  if (!state || presses.length === 0) {
+    report.textContent = ''
+    return
+  }
+  const result = compareTake(presses, state.notes, state.analysis)
+  const percent = (share: number) => `${Math.round(share * 100)}%`
+  const blocks = result.blocks.map((block) => `${block.start}с ${block.presses}/${block.notes}`).join('  ')
+  report.textContent = [
+    `Нажатий ${result.presses}, нот в этом отрезке ${result.notes}, опоздание руки ${Math.round(result.lagSec * 1000)} мс`,
+    `Нажатий попало в ноту ${percent(result.pressesOnNotes)}, нот получило нажатие ${percent(result.notesWithPresses)}`,
+    `Нажатия на удары ${percent(result.pressesOnOnsets)}, на ноты мелодии ${percent(result.pressesOnMelody)}, на слоги ${percent(result.pressesOnSyllables)}`,
+    `Долгих нажатий ${result.longPresses}, лучей в уровне ${result.holds}`,
+    `За 10 секунд, нажатия/ноты: ${blocks}`,
+  ].join('\n')
+}
 
 async function loadTrack(file: File): Promise<void> {
   statusLabel.textContent = 'Декодируем…'
@@ -110,7 +230,11 @@ async function loadTrack(file: File): Promise<void> {
     statusLabel.textContent = `Анализ ${Math.round(fraction * 100)}%`
   })
   statusLabel.textContent = file.name
+  trackName = file.name
+  restoreTake()
   playButton.disabled = false
+  recordButton.disabled = false
+  saveButton.disabled = false
   buildLevel(analysis)
 }
 
@@ -140,6 +264,7 @@ function buildLevel(analysis: AudioAnalysis): void {
 
   state = { analysis, notes, onsets, changes: trace.changes.map((frame) => frame / analysis.fps), parts: trace.parts }
   showFunnel(state, trace)
+  showReport()
   drawAll()
 }
 
@@ -280,6 +405,7 @@ function drawDetail({ analysis, notes, onsets, changes, parts }: MapState): void
   }
 
   drawLanes(ctx, notes, fatesBottom, height, toX, inView)
+  drawPresses(ctx, fatesBottom, height, toX, inView)
   drawGrid(ctx, width, height, span, toX)
 
   ctx.fillStyle = '#dfe9e8'
@@ -404,6 +530,30 @@ function drawLanes(
     ctx.beginPath()
     ctx.arc(x, y, 9, 0, Math.PI * 2)
     ctx.fill()
+  }
+}
+
+/** Живые нажатия: белые кольца поверх нот на той же дорожке, долгие с хвостом. */
+function drawPresses(
+  ctx: CanvasRenderingContext2D,
+  top: number,
+  bottom: number,
+  toX: (time: number) => number,
+  inView: (time: number) => boolean,
+): void {
+  const laneHeight = (bottom - top - 20) / 3
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineWidth = 2
+  for (const press of presses) {
+    if (!inView(press.time)) continue
+    const row = KEY_ROWS[press.key]
+    const y = row === 3 ? top + 14 : top + 20 + laneHeight * (row + 0.5)
+    const x = toX(press.time)
+    ctx.beginPath()
+    ctx.arc(x, y, 6, 0, Math.PI * 2)
+    ctx.moveTo(x + 6, y)
+    ctx.lineTo(toX(press.time + press.duration), y)
+    ctx.stroke()
   }
 }
 

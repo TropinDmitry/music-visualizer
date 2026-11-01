@@ -48,6 +48,18 @@
       #status {
         color: var(--muted);
       }
+      #hint {
+        margin: 0 0 12px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      #report {
+        margin-bottom: 12px;
+        white-space: pre-line;
+      }
+      #record.is-on {
+        background: #ff3b5c;
+      }
       #funnel {
         display: flex;
         flex-wrap: wrap;
@@ -107,8 +119,13 @@
       <select id="difficulty"></select>
       <button id="play" disabled>Играть</button>
       <label>Окно <select id="span"><option value="6">6 с</option><option value="12" selected>12 с</option><option value="30">30 с</option></select></label>
+      <label>Скорость <select id="rate"><option value="1">100%</option><option value="0.75">75%</option><option value="0.5">50%</option></select></label>
+      <button id="record" disabled>Записать нажатия</button>
+      <button id="save" disabled>Скачать запись</button>
       <span id="status">Выберите трек</span>
     </div>
+    <p id="hint">Запись: клавиши A S D, стрелки влево и вправо, пробел, как в игре. Нажимайте как хочется, долгий звук можно держать. Запись идёт с текущего места, повторная запись заменяет только то, что переиграно.</p>
+    <div id="report"></div>
     <div id="funnel"></div>
     <canvas id="overview"></canvas>
     <canvas id="detail"></canvas>

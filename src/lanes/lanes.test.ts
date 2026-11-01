@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { analyzeAudio, mixToMono } from '../audio/analyzer.ts'
 import { synthesizeDemoTrack } from '../audio/demoTrack.ts'
+import { compareTake } from './compareTake.ts'
 import { findMoments, findSections, findSoftPulses, withoutPulses,
   findSustains, songIntensity, type Moment } from './structure.ts'
 import { DIFFICULTIES, findDifficulty, generateLaneLevel, type LaneNote } from './level.ts'
@@ -379,6 +380,23 @@ describe('смена бита посреди трека', () => {
     const before = notes.filter((note) => note.time >= 5 && note.time < 18).length
     const after = notes.filter((note) => note.time >= 22 && note.time < 35).length
     expect(after).toBeGreaterThanOrEqual(before)
+  })
+})
+
+describe('сравнение записи', () => {
+  it('находит опоздание руки и считает совпадения с нотами', () => {
+    const track = analysis
+    const notes = generateLaneLevel(track, hard).filter((note) => note.time < 20)
+    const lag = 0.12
+    const presses = notes.map((note) => ({ time: note.time + lag, key: 'a', duration: 0.05 }))
+    const report = compareTake(presses, notes, track)
+    expect(Math.abs(report.lagSec - lag)).toBeLessThan(0.06)
+    expect(report.pressesOnNotes).toBeGreaterThan(0.9)
+    expect(report.notesWithPresses).toBeGreaterThan(0.9)
+  })
+
+  it('пустая запись не ломает сравнение', () => {
+    expect(compareTake([], [], analysis).presses).toBe(0)
   })
 })
 
