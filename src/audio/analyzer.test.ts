@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { analyzeAudio, logSpacedBinEdges, mixToMono } from './analyzer.ts'
+import { analyzeAudio, findSyllables, logSpacedBinEdges, mixToMono } from './analyzer.ts'
 import { synthesizeDemoTrack } from './demoTrack.ts'
 import { trackMelody } from './melody.ts'
 
@@ -262,5 +262,21 @@ describe('мелодия', () => {
       noise[i] = seed / 2147483647 - 0.5
     }
     expect(trackMelody(noise, sampleRate, 60, 120).noteTimes.length).toBeLessThan(3)
+  })
+})
+
+describe('слоги', () => {
+  it('находит каждый горб огибающей даже без резких ударов', () => {
+    // Восемь плавных слогов в секунду на постоянном фоне
+    const fps = 60
+    const speech = new Float32Array(fps * 4)
+    for (let i = 0; i < speech.length; i++) speech[i] = -30 + 3 * Math.sin((2 * Math.PI * 8 * i) / fps)
+    const { syllableTimes } = findSyllables(speech, fps)
+    expect(syllableTimes.length).toBeGreaterThanOrEqual(30)
+    expect(syllableTimes.length).toBeLessThanOrEqual(33)
+  })
+
+  it('ровный звук слогов не даёт', () => {
+    expect(findSyllables(new Float32Array(600).fill(-30), 60).syllableTimes.length).toBe(0)
   })
 })

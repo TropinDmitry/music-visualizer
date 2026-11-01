@@ -84,6 +84,14 @@ export interface AudioAnalysis {
   spectrum: Float32Array
   /** Ведущая мелодия: высота по кадрам и начала нот. */
   melody: MelodyTrack
+  /**
+   * Огибающая полосы речи в децибелах. В быстрой читке слоги сливаются и резкого
+   * роста громкости нет, зато каждый слог даёт свой горб на этой линии.
+   */
+  speech: Float32Array
+  /** Слоги: пики огибающей речи. Это не распознавание слов, инструмент тоже может дать пик. */
+  syllableTimes: number[]
+  syllableStrengths: number[]
 }
 
 /** Всё тише −80 дБ считаем тишиной: иначе шум округления давал бы «удары». */
@@ -95,6 +103,10 @@ const VOCAL_HIGH_HZ = 3400
 const VOCAL_MIN_GAP_SEC = 0.12
 /** Насколько рост вне полосы голоса гасит рост в ней: так отсекаются удары. */
 const VOCAL_DRUM_PENALTY = 0.8
+const SPEECH_OUTSIDE_SHARE = 0.5
+/** Быстрее 12 слогов в секунду не читает никто. */
+const SYLLABLE_MIN_GAP_SEC = 0.08
+const SYLLABLE_MIN_RISE_DB = 2
 
 export type ProgressCallback = (fraction: number) => void
 
@@ -228,6 +240,8 @@ export function analyzeAudio(
   smoothSpectrumInPlace(spectrum, spectrumBins, fps, opts.attack, opts.release)
 
   const melody = trackMelody(samples, sampleRate, fps, frameCount)
+  const speech = speechEnvelope(spectrumDb, spectrumBins, isVocalBin)
+  const { syllableTimes, syllableStrengths } = findSyllables(speech, fps)
 
   onProgress?.(1)
 
@@ -251,6 +265,9 @@ export function analyzeAudio(
     spectrumBins,
     spectrum,
     melody,
+    speech,
+    syllableTimes,
+    syllableStrengths,
   }
 }
 
@@ -412,6 +429,68 @@ function vocalOnsetCurve(vocalRise: Float32Array, otherRise: Float32Array, isVoc
     curve[i] = Math.max(0, inside - VOCAL_DRUM_PENALTY * outside)
   }
   return curve
+}
+
+/** Средний уровень полосы речи за вычетом части того, что звучит вокруг неё: барабаны широкие. */
+function speechEnvelope(spectrumDb: Float32Array, bins: number, isVocalBin: boolean[]): Float32Array {
+  const frames = spectrumDb.length / bins
+  const raw = new Float32Array(frames)
+  for (let frame = 0; frame < frames; frame++) {
+    let inside = 0
+    let outside = 0
+    let insideCount = 0
+    for (let bin = 0; bin < bins; bin++) {
+      const db = spectrumDb[frame * bins + bin]
+      if (isVocalBin[bin]) {
+        inside += db
+        insideCount += 1
+      } else {
+        outside += db
+      }
+    }
+    raw[frame] = inside / Math.max(1, insideCount) - (SPEECH_OUTSIDE_SHARE * outside) / Math.max(1, bins - insideCount)
+  }
+
+  // Три кадра сглаживания убирают дрожание окна, но не сливают слоги: они длиннее
+  const smooth = new Float32Array(frames)
+  for (let i = 1; i + 1 < frames; i++) smooth[i] = (raw[i - 1] + raw[i] + raw[i + 1]) / 3
+  return smooth
+}
+
+/**
+ * Слоги это горбы на огибающей: пик, который поднимается над обеими соседними
+ * впадинами хотя бы на minRiseDb. Сравнение с впадинами, а не с общим уровнем,
+ * работает и в громкой, и в тихой части.
+ */
+export function findSyllables(
+  speech: Float32Array,
+  fps: number,
+  minRiseDb = SYLLABLE_MIN_RISE_DB,
+): { syllableTimes: number[]; syllableStrengths: number[] } {
+  const peaks: number[] = []
+  const valleys: number[] = []
+  for (let i = 1; i + 1 < speech.length; i++) {
+    if (speech[i] > speech[i - 1] && speech[i] >= speech[i + 1]) peaks.push(i)
+    if (speech[i] < speech[i - 1] && speech[i] <= speech[i + 1]) valleys.push(i)
+  }
+
+  const minGap = SYLLABLE_MIN_GAP_SEC * fps
+  const syllableTimes: number[] = []
+  const syllableStrengths: number[] = []
+  let valley = 0
+  let lastPeak = -Infinity
+  for (let p = 0; p < peaks.length; p++) {
+    const peak = peaks[p]
+    while (valley + 1 < valleys.length && valleys[valley + 1] < peak) valley += 1
+    const before = valleys[valley] < peak ? speech[valleys[valley]] : speech[peak]
+    const after = valley + 1 < valleys.length ? speech[valleys[valley + 1]] : speech[peak]
+    const rise = speech[peak] - Math.max(before, after)
+    if (rise < minRiseDb || peak - lastPeak < minGap) continue
+    lastPeak = peak
+    syllableTimes.push(peak / fps)
+    syllableStrengths.push(rise)
+  }
+  return { syllableTimes, syllableStrengths }
 }
 
 /** То же сглаживание огибающей, но для каждого столбика спектра отдельно. */

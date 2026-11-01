@@ -327,9 +327,8 @@ describe('драматургия песни', () => {
 
   it('режим «По голосу» ставит ноту на слог, даже если он вне ритма', () => {
     const track = analyzeAudio(new Float32Array(44100 * 10), 44100)
-    const vocalFrame = Math.round(4 * track.fps)
-    track.vocalOnsets[vocalFrame] = 1
-    track.vocalStrength[vocalFrame] = 1
+    track.syllableTimes = [4]
+    track.syllableStrengths = [3]
     expect(generateLaneLevel(track, easy, 'voice').some((note) => Math.abs(note.time - 4) < 0.02)).toBe(true)
   })
 
@@ -380,6 +379,31 @@ describe('смена бита посреди трека', () => {
     const before = notes.filter((note) => note.time >= 5 && note.time < 18).length
     const after = notes.filter((note) => note.time >= 22 && note.time < 35).length
     expect(after).toBeGreaterThan(before * 0.7)
+  })
+})
+
+describe('режимы', () => {
+  /** Ровный бит и быстрая читка поверх него: 8 слогов в секунду на всём треке. */
+  function rapTrack() {
+    const track = analyzeAudio(new Float32Array(44100 * 30), 44100)
+    const times: number[] = []
+    for (let time = 2; time < 28; time += 0.125) times.push(time)
+    track.syllableTimes = times
+    track.syllableStrengths = times.map(() => 3)
+    return track
+  }
+
+  it('на быстрой читке уровень идёт за каждым слогом и авто это понимает само', () => {
+    const track = rapTrack()
+    const voice = generateLaneLevel(track, hard, 'voice').filter((note) => note.time >= 10 && note.time < 20)
+    const auto = generateLaneLevel(track, hard, 'auto').filter((note) => note.time >= 10 && note.time < 20)
+    expect(voice.length).toBeGreaterThanOrEqual(70)
+    expect(auto.length).toBeGreaterThanOrEqual(70)
+  })
+
+  it('по ритму слоги не учитываются', () => {
+    const notes = generateLaneLevel(rapTrack(), hard, 'beat')
+    expect(notes.length).toBeLessThan(20)
   })
 })
 

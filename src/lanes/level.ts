@@ -48,10 +48,10 @@ export type DifficultyId = 'easy' | 'normal' | 'hard'
  */
 export type NoteFocus = 'auto' | 'voice' | 'beat'
 
-export const NOTE_FOCUSES: { id: NoteFocus; label: string }[] = [
-  { id: 'auto', label: 'Авто' },
-  { id: 'voice', label: 'По голосу' },
-  { id: 'beat', label: 'По ритму' },
+export const NOTE_FOCUSES: { id: NoteFocus; label: string; hint: string }[] = [
+  { id: 'auto', label: 'Авто', hint: 'Сам выбирает: ритм, мелодия, а где быстро читают, там слоги' },
+  { id: 'voice', label: 'По голосу', hint: 'Весь уровень на слогах: для рэпа и быстрой читки' },
+  { id: 'beat', label: 'По ритму', hint: 'Только удары и сетка ритма, голос не учитывается' },
 ]
 
 export interface Difficulty {
@@ -72,6 +72,8 @@ export interface Difficulty {
   pulsePattern: number[]
   /** Лесенки и лучи вместе с нотами: только там, где пальцы уже натренированы. */
   isAdvanced: boolean
+  /** Самый короткий промежуток между слогами в быстрой читке. */
+  readingGapSec: number
   /** Сколько стрелок максимум в серии. */
   arrowRun: number
   /** На протяжных звуках два луча сразу. */
@@ -80,9 +82,9 @@ export interface Difficulty {
 }
 
 export const DIFFICULTIES: Difficulty[] = [
-  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, pulsePattern: [0], isAdvanced: false, arrowPeriodSec: 20, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
-  { id: 'normal', label: 'Средняя', minGapSec: 0.28, strengthShare: 0.8, pulsePattern: [0, 0.5], isAdvanced: false, arrowPeriodSec: 12, pairEvery: 16, floorGapSec: 0.26, maxPerSecond: 4, arrowRun: 3, doubleHolds: false, canFail: true },
-  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.72, pulsePattern: [0, 0.5], isAdvanced: true, arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.14, maxPerSecond: 7, arrowRun: 4, doubleHolds: true, canFail: true },
+  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, pulsePattern: [0], isAdvanced: false, readingGapSec: 0.42, arrowPeriodSec: 20, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
+  { id: 'normal', label: 'Средняя', minGapSec: 0.28, strengthShare: 0.8, pulsePattern: [0, 0.5], isAdvanced: false, readingGapSec: 0.25, arrowPeriodSec: 12, pairEvery: 16, floorGapSec: 0.26, maxPerSecond: 4, arrowRun: 3, doubleHolds: false, canFail: true },
+  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.72, pulsePattern: [0, 0.5], isAdvanced: true, readingGapSec: 0.08, arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.08, maxPerSecond: 12, arrowRun: 4, doubleHolds: true, canFail: true },
 ]
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
@@ -111,6 +113,8 @@ const STAIRS = [0, 1, 2, 1]
 /** Шаг ритма делится на столько долей: на них встают и удары, и рисунок. */
 const STEP_SLOTS = 4
 const SHORT_STEP_SEC = 0.75
+/** С такой частоты слогов отрезок считается быстрой читкой. */
+const READING_MIN_RATE = 4.5
 /** Ниже этой силы часть спокойная, выше второй мощная: лесенки только в мощной. */
 const CALM_LEVEL = 0.3
 const ACTIVE_LEVEL = 0.6
@@ -127,8 +131,6 @@ const ACCENT_CLEAR_SEC = 0.2
 const INTENSE_LEVEL = 0.55
 /** С чем сравниваем удар: с самым сильным в такой окрестности. */
 const STRENGTH_REACH_SEC = 2
-/** В режиме «По голосу» обычному удару нужно быть ещё заметнее. */
-const VOICE_FOCUS_BEAT_EXTRA = 0.25
 /** В обычном режиме слог становится нотой, только если он сильный: голос поверх ритма. */
 const SYLLABLE_EXTRA = 0.25
 /** Удары ближе этого играются только ровной дробью, а случайную россыпь не сыграть. */
@@ -228,9 +230,16 @@ export function generateLaneLevel(
   const parts = findSongParts(analysis, sustains, pulses)
   const picked = pickFramesWithMoments(analysis, difficulty, moments, focus, intensity, trace)
   const softChains = focus === 'voice' ? [] : splitPulses(pulses)
-  const chains = focus === 'voice' ? [] : parts.map((part) => part.chain)
+  const reading = findReadingSpans(analysis, parts, sustains, focus)
+  const isRead = (time: number) => reading.some((span) => time >= span.start && time < span.end)
+  const chains = focus === 'voice' ? [] : parts.filter((part) => !isRead(part.start)).map((part) => part.chain)
   const heard = difficulty.isAdvanced ? allHeardFrames(analysis, picked) : picked
-  const { frames, ladder, rhythmic, beats } = arrangeRhythm(picked, heard, softChains, chains, analysis.fps, difficulty, intensity)
+  const arranged = arrangeRhythm(picked, heard, softChains, chains, analysis.fps, difficulty, intensity)
+  const { ladder, rhythmic, beats } = arranged
+  const syllables = pickSyllables(analysis, reading, difficulty)
+  const frames = [...arranged.frames.filter((frame) => !isRead(frame / analysis.fps)), ...syllables]
+  frames.sort((a, b) => a - b)
+  rhythmic.push(...syllables)
   // Сетка ритма начинается с нуля, а человеку нужно время взять руки на клавиши
   const firstFrame = FIRST_NOTE_SEC * analysis.fps
   const allowed = frames.filter((frame) => frame >= firstFrame && isAllowed(frame / analysis.fps, moments))
@@ -258,7 +267,8 @@ export function generateLaneLevel(
     phraseEnds.length > 0
       ? placePhraseArrows(notes, phraseEnds, difficulty, sustains, moments, (time) => intensityAt(intensity, time, analysis.fps))
       : placeArrowSeries(notes, difficulty, analysis, sustains)
-  const ladderFrames = new Set(ladder)
+  // Быструю читку не разбиваем парами и лучами: это один поток слогов
+  const ladderFrames = new Set([...ladder, ...syllables])
   const isLadder = (note: LaneNote) => ladderFrames.has(Math.round(note.time * analysis.fps))
   const withPairs = addPairs(withArrows, difficulty, analysis, intensity, isLadder)
   const withSustains = addSustainHolds(withPairs, difficulty, sustains)
@@ -661,7 +671,7 @@ function pickRhythmFrames(
 
   const beats = pickNoteFrames(analysis, 0)
   const beatWeights = beats.map((frame) => beatWeight(analysis, frame))
-  const beatShare = difficulty.strengthShare + (focus === 'voice' ? VOICE_FOCUS_BEAT_EXTRA : 0)
+  const beatShare = difficulty.strengthShare
   addAudible(importance, beats, beatWeights, beatShare, analysis.fps, intensity)
 
   if (focus !== 'beat') {
@@ -721,6 +731,46 @@ function hasOnsetNear(analysis: AudioAnalysis, frame: number): boolean {
     if (analysis.onsets[i] === 1) return true
   }
   return false
+}
+
+/** Где уровень идёт за слогами: весь трек по голосу, в авто только быстрая читка, по ритму нигде. */
+function findReadingSpans(
+  analysis: AudioAnalysis,
+  parts: SongPart[],
+  sustains: Moment[],
+  focus: NoteFocus,
+): { start: number; end: number }[] {
+  if (focus === 'beat') return []
+  if (focus === 'voice') return [{ start: 0, end: analysis.duration }]
+
+  const spans: { start: number; end: number }[] = []
+  for (const part of parts) {
+    const count = analysis.syllableTimes.filter((time) => time >= part.start && time < part.end).length
+    const isHeld = sustains.some((sustain) => sustain.start < part.end && sustain.end > part.start)
+    if (!isHeld && count / (part.end - part.start) >= READING_MIN_RATE) spans.push({ start: part.start, end: part.end })
+  }
+  return spans
+}
+
+/**
+ * Слоги подряд, по времени. Если выбирать сначала самые заметные, каждый выбранный
+ * слог выбивает обоих соседей, и поток читки рвётся.
+ */
+function pickSyllables(
+  analysis: AudioAnalysis,
+  reading: { start: number; end: number }[],
+  difficulty: Difficulty,
+): number[] {
+  const lastTime = analysis.duration - TAIL_FRAMES / analysis.fps
+  const picked: number[] = []
+  let previous = -Infinity
+  for (const time of analysis.syllableTimes) {
+    const isInside = time >= LEAD_IN_SEC && time <= lastTime && reading.some((span) => time >= span.start && time < span.end)
+    if (!isInside || time - previous < difficulty.readingGapSec) continue
+    picked.push(Math.round(time * analysis.fps))
+    previous = time
+  }
+  return picked
 }
 
 /** Мягкий пульс лежит одним списком: разрезаем его на отдельные цепочки. */

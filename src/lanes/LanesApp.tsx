@@ -846,6 +846,7 @@ export function LanesApp() {
                 </button>
               ))}
             </div>
+            <p className="focus-hint">{NOTE_FOCUSES.find((focus) => focus.id === settings.focus)?.hint}</p>
             <div className="segmented look-list">
               {CLIP_LOOKS.map((look) => (
                 <button

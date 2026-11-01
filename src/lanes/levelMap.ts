@@ -281,6 +281,7 @@ function showFunnel(current: MapState, trace: LevelTrace): void {
   const countFate = (fate: Fate) => onsets.filter((onset) => onset.fate === fate).length
   const steps = [
     ['Детектор нашёл ударов', analysis.onsetTimes.length],
+    ['Слогов в секунду', (analysis.syllableTimes.length / analysis.duration).toFixed(1)],
     ['Нот мелодии (кандидаты без ударов рядом)', trace.changes.length],
     ['Прошли порог (с голосом)', trace.audible.length],
     ['Прошли расстояние', trace.spaced.length],

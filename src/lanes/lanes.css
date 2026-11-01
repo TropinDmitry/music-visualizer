@@ -394,3 +394,9 @@
 .is-overdrive .streak-bar div {
   background: #ffc933;
 }
+
+.focus-hint {
+  margin: 8px 0 0;
+  font-size: 13px;
+  opacity: 0.7;
+}
