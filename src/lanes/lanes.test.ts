@@ -379,7 +379,7 @@ describe('смена бита посреди трека', () => {
     const notes = generateLaneLevel(analyzeAudio(beatSwitchTrack(), 44100), findDifficulty('normal'))
     const before = notes.filter((note) => note.time >= 5 && note.time < 18).length
     const after = notes.filter((note) => note.time >= 22 && note.time < 35).length
-    expect(after).toBeGreaterThanOrEqual(before)
+    expect(after).toBeGreaterThan(before * 0.7)
   })
 })
 

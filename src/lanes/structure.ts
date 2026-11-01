@@ -59,6 +59,11 @@ const PULSE_MIN_PROMINENCE = 1.3
 const PULSE_SAME_SOUND = 0.7
 /** Такая смена спектра значит, что музыка стала другой: протяжный звук здесь кончился. */
 const BIG_CHANGE = 0.03
+/** В такой фразе 16 шагов: по записи живой игры стрелки шли именно с этим периодом. */
+const PHRASE_STEPS = 16
+const PHRASE_TOLERANCE_SEC = 0.15
+/** Если событий на сетке блоков меньше, фраз в песне не видно. */
+const PHRASE_MIN_IMPACTS = 3
 /** Песня делится на отрезки, и у каждого свой режим: темп и рисунок внутри песни меняются. */
 const PART_SEC = 8
 /** Ритм выражен ярко, если настоящих ударов в цепочке не меньше этой доли. */
@@ -312,6 +317,46 @@ function longEnoughStep(chain: number[]): number[] {
   const step = (chain[chain.length - 1] - chain[0]) / (chain.length - 1)
   if (step >= RHYTHM_MIN_STEP_SEC) return chain
   return chain.filter((_, index) => index % 2 === 0)
+}
+
+/**
+ * Где кончаются фразы. Музыка строится блоками по 16 шагов, и сильные события песни
+ * приходятся на их границы. Каждое событие пробуем как опору и берём ту, от которой
+ * ровным шагом блоков попадается больше всего других событий.
+ */
+export function findPhraseEnds(analysis: AudioAnalysis, chains: number[][], moments: Moment[]): number[] {
+  const steps: number[] = []
+  for (const chain of chains) {
+    for (let i = 0; i + 1 < chain.length; i++) steps.push(chain[i + 1] - chain[i])
+  }
+  const impacts = moments.filter((moment) => moment.kind === 'impact').map((moment) => moment.start)
+  if (steps.length === 0 || impacts.length === 0) return []
+  steps.sort((a, b) => a - b)
+  const phrase = steps[Math.floor(steps.length / 2)] * PHRASE_STEPS
+
+  let anchor = impacts[0]
+  let bestCount = 0
+  for (const impact of impacts) {
+    let count = 0
+    for (const other of impacts) {
+      const blocks = Math.round((other - impact) / phrase)
+      if (Math.abs(other - impact - blocks * phrase) <= PHRASE_TOLERANCE_SEC) count += 1
+    }
+    if (count > bestCount) {
+      bestCount = count
+      anchor = impact
+    }
+  }
+  if (bestCount < PHRASE_MIN_IMPACTS) return []
+
+  const isPlayed = (time: number) =>
+    chains.some((chain) => chain.length > 0 && time >= chain[0] && time <= chain[chain.length - 1] + phrase / PHRASE_STEPS)
+  const ends: number[] = []
+  const first = anchor - Math.floor(anchor / phrase) * phrase
+  for (let time = first; time < analysis.duration; time += phrase) {
+    if (isPlayed(time - phrase / PHRASE_STEPS)) ends.push(time)
+  }
+  return ends
 }
 
 /** Режет протяжные участки там, где звук резко сменился. */
