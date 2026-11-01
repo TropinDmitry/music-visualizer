@@ -2,7 +2,6 @@ import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { beatWeight, pickNoteFrames } from '../game/level.ts'
 import {
   findMoments,
-  findNoteChanges,
   findSections,
   findSoftPulses,
   findSongParts,
@@ -122,12 +121,15 @@ const SYLLABLE_EXTRA = 0.25
 /** Удары ближе этого играются только ровной дробью, а случайную россыпь не сыграть. */
 const FAST_GAP_SEC = 0.17
 const CHANGE_NEAR_ONSET_SEC = 0.1
+const PITCH_LOOK_AHEAD_FRAMES = 4
+/** С какими нотами вокруг сравниваем высоту. */
+const PITCH_REACH_SEC = 2
+/** Меньше трёх полутонов разброса это одна нота, а не ход мелодии. */
+const PITCH_MIN_RANGE = 3
 /** Дальше этого соседние удары пульса принадлежат разным отрезкам. */
 const PULSE_MAX_STEP_SEC = 1.3
 /** Сильный удар сразу перед пульсом остаётся нотой. */
 const PULSE_EDGE_SEC = 0.05
-const CHANGE_LEVEL_REACH_FRAMES = 6
-const CHANGE_MIN_LEVEL_SHARE = 0.85
 const EVEN_GAP_TOLERANCE_SEC = 0.04
 /** В активной части порог ниже: нотами становятся и звуки потише, игра идёт бодрее. */
 const ACTIVE_SHARE_DROP = 0.2
@@ -166,7 +168,7 @@ const MIN_SPACE_GAP_SEC = 8
 export interface LevelTrace {
   /** Кадры ударов, прошедших порог силы. */
   audible: number[]
-  /** Кадры смен звука, найденных по спектру. */
+  /** Кадры нот мелодии, ставших кандидатами. */
   changes: number[]
   /** Кадры, оставшиеся после минимального расстояния. */
   spaced: number[]
@@ -198,8 +200,9 @@ export function generateLaneLevel(
   const sustains = withoutPulses(rawSustains, pulses)
   const parts = findSongParts(analysis, sustains, pulses)
   const picked = pickFramesWithMoments(analysis, difficulty, moments, focus, intensity, trace)
-  const chains = focus === 'voice' ? [] : [...splitPulses(pulses), ...parts.map((part) => part.chain)]
-  const { frames, ladder } = arrangeRhythm(picked, chains, analysis.fps, difficulty)
+  const softChains = focus === 'voice' ? [] : splitPulses(pulses)
+  const chains = focus === 'voice' ? [] : parts.map((part) => part.chain)
+  const { frames, ladder } = arrangeRhythm(picked, softChains, chains, analysis.fps, difficulty)
   // Сетка ритма начинается с нуля, а человеку нужно время взять руки на клавиши
   const firstFrame = FIRST_NOTE_SEC * analysis.fps
   const allowed = frames.filter((frame) => frame >= firstFrame && isAllowed(frame / analysis.fps, moments))
@@ -230,7 +233,7 @@ export function generateLaneLevel(
   const withAccents = addAccents(withHolds, moments, sections, sustains)
   if (trace) trace.beforeLimit = withAccents
   // Последним: предыдущие шаги убирают ноты, и соседями могут оказаться ноты с одной дорожки
-  return avoidTriples(limitDensity(withAccents, difficulty), isLadder)
+  return avoidTriples(dropNotesUnderBeams(limitDensity(withAccents, difficulty)), isLadder)
 }
 
 /** Серия ровных чётких ударов, кандидат на стрелки. */
@@ -386,6 +389,14 @@ function addHolds(
   return result
 }
 
+/** Парные ноты ставятся после лучей и могут попасть под луч, а нажать там нельзя. */
+function dropNotesUnderBeams(notes: LaneNote[]): LaneNote[] {
+  return notes.filter((note, index) => {
+    const canPress = note.kind === 'hold' || note.kind === 'swipe' || note.kind === 'space'
+    return canPress || !isLaneHeld(notes, index, note.lane)
+  })
+}
+
 /** Третья нота подряд на той же дорожке скучна, сдвигаем её на свободную. */
 function avoidTriples(notes: LaneNote[], isLadder: (note: LaneNote) => boolean): LaneNote[] {
   const result = notes.map((note) => ({ ...note }))
@@ -538,21 +549,22 @@ function pickRhythmFrames(
     addAudible(importance, syllables, weights, syllableShare, analysis.fps, intensity)
   }
 
-  // Смена ноты в риффе не даёт прироста громкости, поэтому ищется по спектру отдельно
-  const changes: number[] = []
-  const changeSizes: number[] = []
+  // Смена ноты в риффе не даёт прироста громкости, поэтому мелодия идёт отдельно
+  const melodyFrames: number[] = []
+  const melodyStrengths: number[] = []
   if (focus !== 'voice') {
     const lastTime = analysis.duration - TAIL_FRAMES / analysis.fps
-    for (const change of findNoteChanges(analysis)) {
-      if (change.time < LEAD_IN_SEC || change.time > lastTime) continue
-      const frame = Math.round(change.time * analysis.fps)
-      // Рядом уже есть удар: он точнее по времени, смена нужна только там, где удара нет
-      if (hasOnsetNear(analysis, frame) || isFading(analysis, frame)) continue
-      changes.push(frame)
-      changeSizes.push(change.size)
+    const { noteTimes, noteStrengths } = analysis.melody
+    for (let i = 0; i < noteTimes.length; i++) {
+      if (noteTimes[i] < LEAD_IN_SEC || noteTimes[i] > lastTime) continue
+      const frame = Math.round(noteTimes[i] * analysis.fps)
+      // Рядом уже есть удар: он точнее по времени
+      if (hasOnsetNear(analysis, frame)) continue
+      melodyFrames.push(frame)
+      melodyStrengths.push(noteStrengths[i])
     }
   }
-  addAudible(importance, changes, changeSizes, difficulty.strengthShare, analysis.fps, intensity)
+  addAudible(importance, melodyFrames, melodyStrengths, difficulty.strengthShare, analysis.fps, intensity)
 
   const candidates = [...importance.keys()]
   candidates.sort((a, b) => (importance.get(b) ?? 0) - (importance.get(a) ?? 0))
@@ -569,19 +581,11 @@ function pickRhythmFrames(
   const even = dropUnevenFast(picked, analysis.fps)
   if (trace) {
     trace.audible = candidates
-    trace.changes = changes
+    trace.changes = melodyFrames
     trace.spaced = picked
     trace.even = even
   }
   return even
-}
-
-/** Затухание тоже меняет спектр, но это не новая нота. */
-function isFading(analysis: AudioAnalysis, frame: number): boolean {
-  const level = (at: number) => analysis.mid[at] + analysis.treble[at]
-  const after = Math.min(frame + CHANGE_LEVEL_REACH_FRAMES, analysis.frameCount - 1)
-  const before = Math.max(frame - CHANGE_LEVEL_REACH_FRAMES, 0)
-  return level(after) < level(before) * CHANGE_MIN_LEVEL_SHARE
 }
 
 function hasOnsetNear(analysis: AudioAnalysis, frame: number): boolean {
@@ -615,6 +619,7 @@ function splitPulses(pulses: number[]): number[][] {
  */
 function arrangeRhythm(
   picked: number[],
+  softChains: number[][],
   chains: number[][],
   fps: number,
   difficulty: Difficulty,
@@ -622,8 +627,9 @@ function arrangeRhythm(
   let frames = [...picked]
   const ladder: number[] = []
 
-  for (const chain of chains) {
+  for (const chain of [...softChains, ...chains]) {
     if (chain.length < 2) continue
+    const isSoft = softChains.includes(chain)
     const steps: Set<number>[] = []
     for (let i = 0; i + 1 < chain.length; i++) {
       const slotSec = (chain[i + 1] - chain[i]) / STEP_SLOTS
@@ -650,7 +656,7 @@ function arrangeRhythm(
         if (isLong && !ladderSteps.has(i + 1)) ladder.push(toFrame(STEP_SLOTS), toFrame(STEP_SLOTS + 1))
         continue
       }
-      for (const slot of chooseSlots(steps[i], difficulty)) frames.push(toFrame(slot))
+      for (const slot of chooseSlots(steps[i], difficulty, isSoft)) frames.push(toFrame(slot))
     }
   }
 
@@ -674,8 +680,10 @@ function chooseLadderSteps(steps: Set<number>[]): Set<number> {
 }
 
 /** Обычный шаг: настоящие удары плюс опорные доли, чтобы рука не теряла ритм. */
-function chooseSlots(real: Set<number>, difficulty: Difficulty): Set<number> {
+function chooseSlots(real: Set<number>, difficulty: Difficulty, isSoft: boolean): Set<number> {
   const slots = new Set(real)
+  // На мягком пульсе ударов почти не слышно, поэтому рисунок «тук, ту-тук» держит сам шаг
+  if (isSoft && difficulty.isAdvanced) slots.add(STEP_SLOTS - 1)
   for (const share of difficulty.pulsePattern) slots.add(Math.round(share * STEP_SLOTS))
   return slots
 }
@@ -907,11 +915,35 @@ function chooseLanes(analysis: AudioAnalysis, frames: number[]): number[] {
     let lane = 1
     if (brightness[i] < lowLimit) lane = 0
     if (brightness[i] >= highLimit) lane = 2
+    const melodyLane = laneByPitch(analysis, frames[i])
+    if (melodyLane !== -1) lane = melodyLane
     // Больше двух нот подряд на одной дорожке скучно: сдвигаем третью
     if (i >= 2 && lanes[i - 1] === lane && lanes[i - 2] === lane) lane = (lane + 1) % 3
     lanes.push(lane)
   }
   return lanes
+}
+
+/**
+ * Там, где ясно звучит мелодия, дорожку выбирает высота: нота выше соседних уходит
+ * вправо, ниже влево. Рука повторяет ход мелодии. Без мелодии вернёт -1.
+ */
+function laneByPitch(analysis: AudioAnalysis, frame: number): number {
+  const { pitch } = analysis.melody
+  // Смотрим чуть позже начала: окно FFT длинное, новая нота проявляется не сразу
+  const current = pitch[Math.min(frame + PITCH_LOOK_AHEAD_FRAMES, pitch.length - 1)]
+  if (current === 0) return -1
+
+  const reach = Math.round(PITCH_REACH_SEC * analysis.fps)
+  let low = current
+  let high = current
+  for (let i = Math.max(0, frame - reach); i < Math.min(pitch.length, frame + reach); i++) {
+    if (pitch[i] === 0) continue
+    low = Math.min(low, pitch[i])
+    high = Math.max(high, pitch[i])
+  }
+  if (high - low < PITCH_MIN_RANGE) return -1
+  return Math.min(2, Math.floor(((current - low) / (high - low)) * 3))
 }
 
 function spectrumCenter(analysis: AudioAnalysis, frame: number): number {

@@ -314,11 +314,6 @@ function longEnoughStep(chain: number[]): number[] {
   return chain.filter((_, index) => index % 2 === 0)
 }
 
-/** Смены звука по всему треку: удары детектор видит, а смену ноты в риффе почти нет. */
-export function findNoteChanges(analysis: AudioAnalysis): SoundChange[] {
-  return spectrumChanges(analysis, 0, analysis.duration)
-}
-
 /** Режет протяжные участки там, где звук резко сменился. */
 export function splitAtBigChanges(analysis: AudioAnalysis, sustains: Moment[]): Moment[] {
   const result: Moment[] = []

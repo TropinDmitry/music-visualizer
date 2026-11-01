@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { analyzeAudio, logSpacedBinEdges, mixToMono } from './analyzer.ts'
 import { synthesizeDemoTrack } from './demoTrack.ts'
+import { trackMelody } from './melody.ts'
 
 const SAMPLE_RATE = 44100
 
@@ -228,5 +229,38 @@ describe('демо-трек', () => {
       }
       expect(smallestError).toBeLessThan(0.04)
     }
+  })
+})
+
+describe('мелодия', () => {
+  const sampleRate = 44100
+
+  /** Плавный тон с гармониками: высота меняется без всякого удара. */
+  function glideFreeMelody(notes: number[], noteSec: number): Float32Array {
+    const samples = new Float32Array(Math.round(notes.length * noteSec * sampleRate))
+    let phase = 0
+    for (let i = 0; i < samples.length; i++) {
+      const note = notes[Math.floor(i / sampleRate / noteSec)]
+      phase += (2 * Math.PI * 440 * 2 ** ((note - 69) / 12)) / sampleRate
+      samples[i] = 0.4 * Math.sin(phase) + 0.15 * Math.sin(2 * phase)
+    }
+    return samples
+  }
+
+  it('находит высоту и начало каждой ноты без ударов', () => {
+    const notes = [60, 64, 67, 72, 67, 64, 60, 62]
+    const melody = trackMelody(glideFreeMelody(notes, 0.4), sampleRate, 60, 192)
+    expect(melody.notePitches).toEqual(notes)
+    melody.noteTimes.forEach((time, i) => expect(Math.abs(time - i * 0.4)).toBeLessThan(0.08))
+  })
+
+  it('в шуме ведущего звука нет', () => {
+    const noise = new Float32Array(sampleRate * 2)
+    let seed = 1
+    for (let i = 0; i < noise.length; i++) {
+      seed = (seed * 16807) % 2147483647
+      noise[i] = seed / 2147483647 - 0.5
+    }
+    expect(trackMelody(noise, sampleRate, 60, 120).noteTimes.length).toBeLessThan(3)
   })
 })

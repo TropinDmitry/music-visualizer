@@ -107,7 +107,9 @@ describe('generateLaneLevel', () => {
       for (const hold of notes.filter((note) => note.kind === 'hold')) {
         const end = hold.time + (hold.duration ?? 0)
         for (const note of notes) {
-          const isUnderBeam = note.time > hold.time && note.time < end
+          // Стрелки и пробел не привязаны к дорожке
+          const isTied = note.kind !== 'swipe' && note.kind !== 'space'
+          const isUnderBeam = isTied && note.time > hold.time && note.time < end
           expect(isUnderBeam && note.lane === hold.lane).toBe(false)
         }
       }

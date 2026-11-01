@@ -1,4 +1,5 @@
 import { FFT, hannWindow } from './fft.ts'
+import { trackMelody, type MelodyTrack } from './melody.ts'
 
 /**
  * Офлайн-анализ трека по кадрам.
@@ -81,6 +82,8 @@ export interface AudioAnalysis {
   spectrumBins: number
   /** Спектр 0..1, кадры подряд: [кадр0: bins значений][кадр1: ...]. */
   spectrum: Float32Array
+  /** Ведущая мелодия: высота по кадрам и начала нот. */
+  melody: MelodyTrack
 }
 
 /** Всё тише −80 дБ считаем тишиной: иначе шум округления давал бы «удары». */
@@ -224,6 +227,8 @@ export function analyzeAudio(
   const spectrum = normalizeSpectrum(spectrumDb)
   smoothSpectrumInPlace(spectrum, spectrumBins, fps, opts.attack, opts.release)
 
+  const melody = trackMelody(samples, sampleRate, fps, frameCount)
+
   onProgress?.(1)
 
   return {
@@ -245,6 +250,7 @@ export function analyzeAudio(
     energyIntegral,
     spectrumBins,
     spectrum,
+    melody,
   }
 }
 

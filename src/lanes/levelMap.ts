@@ -44,7 +44,7 @@ interface MapState {
   analysis: AudioAnalysis
   notes: LaneNote[]
   onsets: OnsetInfo[]
-  /** Смены звука, найденные по спектру. */
+  /** Ноты мелодии. */
   changes: number[]
   parts: SongPart[]
 }
@@ -69,7 +69,7 @@ for (const difficulty of DIFFICULTIES) {
 difficultySelect.value = 'hard'
 legend.innerHTML =
   FATES.map((fate) => `<span><i style="background:${fate.color}"></i>${fate.label}</span>`).join('') +
-  '<span><i style="background:#5ee6b8"></i>смена звука по спектру (метка над рядом судьбы)</span>' +
+  '<span><i style="background:#5ee6b8"></i>нота мелодии (метка над рядом судьбы), белая линия на спектрограмме это найденная высота</span>' +
   '<span>полоса над дорожками: зелёная за ритмом, оранжевая за яркими звуками</span>'
 
 fileInput.addEventListener('change', () => {
@@ -155,7 +155,7 @@ function showFunnel(current: MapState, trace: LevelTrace): void {
   const countFate = (fate: Fate) => onsets.filter((onset) => onset.fate === fate).length
   const steps = [
     ['Детектор нашёл ударов', analysis.onsetTimes.length],
-    ['Смен звука по спектру', trace.changes.length],
+    ['Нот мелодии (кандидаты без ударов рядом)', trace.changes.length],
     ['Прошли порог (с голосом)', trace.audible.length],
     ['Прошли расстояние', trace.spaced.length],
     ['Прошли ровность', trace.even.length],
@@ -239,6 +239,7 @@ function drawDetail({ analysis, notes, onsets, changes, parts }: MapState): void
   const fatesBottom = strengthBottom + height * ROW_FATES
 
   drawSpectrum(ctx, analysis, width, spectrumBottom, span)
+  drawMelody(ctx, analysis, width, spectrumBottom, span)
   drawStrength(ctx, analysis, width, spectrumBottom, strengthBottom, span)
 
   // Судьба каждого удара: высота тем больше, чем он сильнее
@@ -261,7 +262,7 @@ function drawDetail({ analysis, notes, onsets, changes, parts }: MapState): void
     ctx.globalAlpha = 1
   }
 
-  // Смены звука: короткие метки сверху ряда судьбы
+  // Ноты мелодии: короткие метки сверху ряда судьбы
   ctx.strokeStyle = '#5ee6b8'
   ctx.lineWidth = 2
   for (const time of changes) {
@@ -318,6 +319,28 @@ function drawSpectrum(
       ctx.fillStyle = `hsl(${170 - level * 130} 80% ${level * 62}%)`
       ctx.fillRect(column * columnWidth, bottom - (bin + 1) * binHeight, columnWidth + 1, binHeight + 1)
     }
+  }
+}
+
+/** Найденная высота поверх спектрограммы: белая линия. */
+function drawMelody(
+  ctx: CanvasRenderingContext2D,
+  analysis: AudioAnalysis,
+  width: number,
+  bottom: number,
+  span: number,
+): void {
+  // Та же логарифмическая шкала, что у спектрограммы: 30 Гц внизу, 16 кГц вверху
+  const lowHz = 30
+  const highHz = 16000
+  ctx.fillStyle = '#ffffff'
+  for (let x = 0; x < width; x += 2) {
+    const frame = Math.round((viewStart + (x / width) * span) * analysis.fps)
+    if (frame >= analysis.frameCount) break
+    const pitch = analysis.melody.pitch[frame]
+    if (pitch === 0) continue
+    const hz = 440 * 2 ** ((pitch - 69) / 12)
+    ctx.fillRect(x, bottom - (Math.log(hz / lowHz) / Math.log(highHz / lowHz)) * bottom, 2, 2)
   }
 }
 
