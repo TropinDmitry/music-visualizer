@@ -401,6 +401,22 @@ describe('режимы', () => {
     expect(auto.length).toBeGreaterThanOrEqual(70)
   })
 
+  it('в длинной читке рисунки пальцев разные, а средняя сложность легче сложной', () => {
+    const track = rapTrack()
+    const notes = generateLaneLevel(track, hard, 'voice').filter((note) => note.kind === 'tap')
+    const triples = new Map<string, number>()
+    for (let i = 2; i < notes.length; i++) {
+      const key = `${notes[i - 2].lane}${notes[i - 1].lane}${notes[i].lane}`
+      triples.set(key, (triples.get(key) ?? 0) + 1)
+    }
+    expect(triples.size).toBeGreaterThanOrEqual(6)
+    expect(Math.max(...triples.values()) / notes.length).toBeLessThan(0.3)
+
+    const middle = generateLaneLevel(track, findDifficulty('normal'), 'voice')
+    expect(middle.length).toBeLessThan(notes.length)
+    expect(middle.length).toBeGreaterThan(notes.length * 0.4)
+  })
+
   it('по ритму слоги не учитываются', () => {
     const notes = generateLaneLevel(rapTrack(), hard, 'beat')
     expect(notes.length).toBeLessThan(20)

@@ -74,6 +74,10 @@ export interface Difficulty {
   isAdvanced: boolean
   /** Самый короткий промежуток между слогами в быстрой читке. */
   readingGapSec: number
+  /** В каждых скольких шагах ритма одна лесенка. */
+  ladderPhraseSteps: number
+  /** Вне лесенок ноты только на восьмых: так средняя сложность читается, но не скучна. */
+  isEighthsOnly: boolean
   /** Сколько стрелок максимум в серии. */
   arrowRun: number
   /** На протяжных звуках два луча сразу. */
@@ -82,9 +86,9 @@ export interface Difficulty {
 }
 
 export const DIFFICULTIES: Difficulty[] = [
-  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, pulsePattern: [0], isAdvanced: false, readingGapSec: 0.42, arrowPeriodSec: 20, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
-  { id: 'normal', label: 'Средняя', minGapSec: 0.28, strengthShare: 0.8, pulsePattern: [0, 0.5], isAdvanced: false, readingGapSec: 0.25, arrowPeriodSec: 12, pairEvery: 16, floorGapSec: 0.26, maxPerSecond: 4, arrowRun: 3, doubleHolds: false, canFail: true },
-  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.72, pulsePattern: [0, 0.5], isAdvanced: true, readingGapSec: 0.08, arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.08, maxPerSecond: 12, arrowRun: 4, doubleHolds: true, canFail: true },
+  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, pulsePattern: [0], isAdvanced: false, readingGapSec: 0.42, ladderPhraseSteps: 4, isEighthsOnly: true, arrowPeriodSec: 20, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
+  { id: 'normal', label: 'Средняя', minGapSec: 0.2, strengthShare: 0.76, pulsePattern: [0, 0.5], isAdvanced: true, readingGapSec: 0.16, ladderPhraseSteps: 8, isEighthsOnly: true, arrowPeriodSec: 12, pairEvery: 16, floorGapSec: 0.15, maxPerSecond: 7, arrowRun: 3, doubleHolds: false, canFail: true },
+  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.72, pulsePattern: [0, 0.5], isAdvanced: true, readingGapSec: 0.08, ladderPhraseSteps: 4, isEighthsOnly: false, arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.08, maxPerSecond: 12, arrowRun: 4, doubleHolds: true, canFail: true },
 ]
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
@@ -118,13 +122,29 @@ const READING_MIN_RATE = 4.5
 /** Ниже этой силы часть спокойная, выше второй мощная: лесенки только в мощной. */
 const CALM_LEVEL = 0.3
 const ACTIVE_LEVEL = 0.6
-/** В каждой такой фразе самый насыщенный шаг становится лесенкой. */
-const PHRASE_STEPS = 4
 /** Сколько настоящих ударов нужно в шаге, чтобы лесенка была под музыку. */
 const LADDER_MIN_HITS = 2
 /** Ноты дальше этого уже не одна серия пальцев. */
 const ROLL_MAX_GAP_SEC = 0.5
-const ROLL_BACK_EVERY = 3
+/** Рисунки пальцев: круги в обе стороны, зигзаги и возвраты к одной дорожке. */
+const ROLL_MOTIFS = [
+  [0, 1, 2],
+  [2, 0, 1, 0],
+  [2, 1, 0],
+  [0, 2, 1, 2],
+  [1, 0, 2],
+  [0, 1, 0, 2],
+  [1, 2, 0],
+  [2, 1, 2, 0],
+  [0, 2, 1],
+  [1, 2, 1, 0],
+  [2, 0, 1],
+  [1, 0, 1, 2],
+]
+/** Шаг по списку взаимно прост с его длиной, поэтому пройдутся все рисунки. */
+const ROLL_MOTIF_STRIDE = 5
+/** Сколько нот держится один рисунок в длинной серии. */
+const ROLL_MOTIF_NOTES = 7
 /** Вокруг акцента оставляем воздух, чтобы он прозвучал отдельно. */
 const ACCENT_CLEAR_SEC = 0.2
 /** Выше этой силы песни часть нот становится парными. */
@@ -828,7 +848,7 @@ function arrangeRhythm(
     frames = frames.filter((frame) => frame / fps < first || frame / fps >= last)
 
     const canLadder = (step: number) => intensityAt(intensity, chain[step], fps) >= ACTIVE_LEVEL
-    const ladderSteps = difficulty.isAdvanced ? chooseLadderSteps(steps, canLadder) : new Set<number>()
+    const ladderSteps = difficulty.isAdvanced ? chooseLadderSteps(steps, canLadder, difficulty.ladderPhraseSteps) : new Set<number>()
     for (let i = 0; i < steps.length; i++) {
       const slotSec = (chain[i + 1] - chain[i]) / STEP_SLOTS
       const toFrame = (slot: number) => Math.round((chain[i] + slot * slotSec) * fps)
@@ -836,7 +856,7 @@ function arrangeRhythm(
       if (ladderSteps.has(i)) {
         for (let slot = 0; slot < STEP_SLOTS; slot++) ladder.push(toFrame(slot))
         // Если музыка не кончилась, лесенка тянется до шести нот
-        const isLong = i + 1 < steps.length && steps[i + 1].size >= LADDER_MIN_HITS
+        const isLong = difficulty.doubleHolds && i + 1 < steps.length && steps[i + 1].size >= LADDER_MIN_HITS
         if (isLong && !ladderSteps.has(i + 1)) ladder.push(toFrame(STEP_SLOTS), toFrame(STEP_SLOTS + 1))
         continue
       }
@@ -870,11 +890,15 @@ function allHeardFrames(analysis: AudioAnalysis, picked: number[]): number[] {
 }
 
 /** В каждой фразе лесенкой становится шаг, где музыка сама звучит чаще всего. */
-function chooseLadderSteps(steps: Set<number>[], canLadder: (step: number) => boolean): Set<number> {
+function chooseLadderSteps(
+  steps: Set<number>[],
+  canLadder: (step: number) => boolean,
+  phraseSteps: number,
+): Set<number> {
   const chosen = new Set<number>()
-  for (let start = 0; start < steps.length; start += PHRASE_STEPS) {
+  for (let start = 0; start < steps.length; start += phraseSteps) {
     let best = -1
-    for (let i = start; i < Math.min(start + PHRASE_STEPS, steps.length); i++) {
+    for (let i = start; i < Math.min(start + phraseSteps, steps.length); i++) {
       const isRich = steps[i].size >= LADDER_MIN_HITS && canLadder(i)
       if (isRich && (best === -1 || steps[i].size >= steps[best].size)) best = i
     }
@@ -892,9 +916,10 @@ function chooseSlots(
   isCalm: boolean,
 ): Set<number> {
   // На коротком шаге все доли дали бы пять нажатий в секунду всю песню подряд
-  const slots = new Set([...real].filter((slot) => !(isShort || isCalm) || slot % 2 === 0))
+  const isCoarse = isShort || isCalm || difficulty.isEighthsOnly
+  const slots = new Set([...real].filter((slot) => !isCoarse || slot % 2 === 0))
   // На мягком пульсе ударов почти не слышно, поэтому рисунок «тук, ту-тук» держит сам шаг
-  if (isSoft && difficulty.isAdvanced) slots.add(STEP_SLOTS - 1)
+  if (isSoft && !difficulty.isEighthsOnly) slots.add(STEP_SLOTS - 1)
   // Спокойной части хватает опоры на начало шага: иначе она сложнее припева
   if (isCalm) {
     slots.add(0)
@@ -905,22 +930,29 @@ function chooseSlots(
 }
 
 /**
- * Ролл: в живой игре пальцы идут по кругу A, S, D, A, а не туда-обратно, и одна
- * клавиша подряд почти не встречается. Новая серия начинается после паузы,
- * каждая третья идёт в обратную сторону.
+ * Рисунок пальцев. В живой игре одна клавиша подряд почти не встречается, но один
+ * и тот же круг быстро надоедает, поэтому рисунки сменяют друг друга: новый берётся
+ * после паузы и внутри длинной серии.
  */
 function chooseRollLanes(rhythmic: number[], fps: number): Map<number, number> {
   const sorted = [...new Set(rhythmic)].sort((a, b) => a - b)
   const lanes = new Map<number, number>()
+  let motif = 0
   let index = 0
-  let run = 0
+  let previous = -1
   for (let i = 0; i < sorted.length; i++) {
-    if (i > 0 && (sorted[i] - sorted[i - 1]) / fps > ROLL_MAX_GAP_SEC) {
+    const isNewRun = i > 0 && (sorted[i] - sorted[i - 1]) / fps > ROLL_MAX_GAP_SEC
+    const pattern = ROLL_MOTIFS[motif]
+    const isLongEnough = index >= ROLL_MOTIF_NOTES && index % pattern.length === 0
+    if (isNewRun || isLongEnough) {
+      motif = (motif + ROLL_MOTIF_STRIDE) % ROLL_MOTIFS.length
       index = 0
-      run += 1
     }
-    const lane = index % 3
-    lanes.set(sorted[i], run % ROLL_BACK_EVERY === ROLL_BACK_EVERY - 1 ? 2 - lane : lane)
+    let lane = ROLL_MOTIFS[motif][index % ROLL_MOTIFS[motif].length]
+    // На стыке рисунков не бьём одну клавишу дважды
+    if (lane === previous) lane = (lane + 1) % 3
+    lanes.set(sorted[i], lane)
+    previous = lane
     index += 1
   }
   return lanes
