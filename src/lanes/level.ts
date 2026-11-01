@@ -111,6 +111,9 @@ const STAIRS = [0, 1, 2, 1]
 /** Шаг ритма делится на столько долей: на них встают и удары, и рисунок. */
 const STEP_SLOTS = 4
 const SHORT_STEP_SEC = 0.75
+/** Ниже этой силы часть спокойная, выше второй мощная: лесенки только в мощной. */
+const CALM_LEVEL = 0.3
+const ACTIVE_LEVEL = 0.6
 /** В каждой такой фразе самый насыщенный шаг становится лесенкой. */
 const PHRASE_STEPS = 4
 /** Сколько настоящих ударов нужно в шаге, чтобы лесенка была под музыку. */
@@ -141,8 +144,9 @@ const PULSE_MAX_STEP_SEC = 1.3
 /** Сильный удар сразу перед пульсом остаётся нотой. */
 const PULSE_EDGE_SEC = 0.05
 const EVEN_GAP_TOLERANCE_SEC = 0.04
-/** В активной части порог ниже: нотами становятся и звуки потише, игра идёт бодрее. */
-const ACTIVE_SHARE_DROP = 0.2
+/** В активной части порог ниже, в спокойной выше: так плотность идёт за силой песни. */
+const ACTIVE_SHARE_DROP = 0.3
+const CALM_SHARE_RISE = 0.12
 const LEAD_IN_SEC = 1.5
 /** Раньше этого нот нет: песня только началась. */
 const FIRST_NOTE_SEC = 3
@@ -226,7 +230,7 @@ export function generateLaneLevel(
   const softChains = focus === 'voice' ? [] : splitPulses(pulses)
   const chains = focus === 'voice' ? [] : parts.map((part) => part.chain)
   const heard = difficulty.isAdvanced ? allHeardFrames(analysis, picked) : picked
-  const { frames, ladder, rhythmic, beats } = arrangeRhythm(picked, heard, softChains, chains, analysis.fps, difficulty)
+  const { frames, ladder, rhythmic, beats } = arrangeRhythm(picked, heard, softChains, chains, analysis.fps, difficulty, intensity)
   // Сетка ритма начинается с нуля, а человеку нужно время взять руки на клавиши
   const firstFrame = FIRST_NOTE_SEC * analysis.fps
   const allowed = frames.filter((frame) => frame >= firstFrame && isAllowed(frame / analysis.fps, moments))
@@ -252,7 +256,7 @@ export function generateLaneLevel(
   const phraseEnds = focus === 'voice' ? [] : findPhraseEnds(analysis, [...softChains, ...chains], moments)
   const withArrows =
     phraseEnds.length > 0
-      ? placePhraseArrows(notes, phraseEnds, difficulty, sustains, moments)
+      ? placePhraseArrows(notes, phraseEnds, difficulty, sustains, moments, (time) => intensityAt(intensity, time, analysis.fps))
       : placeArrowSeries(notes, difficulty, analysis, sustains)
   const ladderFrames = new Set(ladder)
   const isLadder = (note: LaneNote) => ladderFrames.has(Math.round(note.time * analysis.fps))
@@ -276,6 +280,7 @@ function placePhraseArrows(
   difficulty: Difficulty,
   sustains: Moment[],
   moments: Moment[],
+  levelAt: (time: number) => number,
 ): LaneNote[] {
   let result = notes
   let serie = 0
@@ -284,7 +289,7 @@ function placePhraseArrows(
   const leads = PHRASE_ARROW_LEADS.slice(PHRASE_ARROW_LEADS.length - count)
   for (const end of phraseEnds) {
     const isPause = leads.some((lead) => end - lead < FIRST_NOTE_SEC || !isAllowed(end - lead, moments))
-    if (isPause || isNearSustain(end - leads[0], sustains)) continue
+    if (isPause || levelAt(end - leads[0]) < CALM_LEVEL || isNearSustain(end - leads[0], sustains)) continue
     const first = end - leads[0] - PHRASE_ARROW_CLEAR_SEC
     const last = end - leads[leads.length - 1] + PHRASE_ARROW_CLEAR_SEC
     result = result.filter((note) => note.time < first || note.time > last)
@@ -745,6 +750,7 @@ function arrangeRhythm(
   chains: number[][],
   fps: number,
   difficulty: Difficulty,
+  intensity: Float32Array,
 ): { frames: number[]; ladder: number[]; rhythmic: number[]; beats: Map<number, number> } {
   let frames = [...picked]
   const ladder: number[] = []
@@ -758,7 +764,9 @@ function arrangeRhythm(
     for (let i = 0; i + 1 < chain.length; i++) {
       const slotSec = (chain[i + 1] - chain[i]) / STEP_SLOTS
       const slots = new Set<number>()
-      for (const frame of heard) {
+      // Мелочь отбиваем только в мощной части, иначе спокойное начало сложнее припева
+      const level = intensityAt(intensity, chain[i], fps)
+      for (const frame of level < ACTIVE_LEVEL ? picked : heard) {
         const slot = Math.round((frame / fps - chain[i]) / slotSec)
         if (slot >= 0 && slot < STEP_SLOTS) slots.add(slot)
       }
@@ -769,7 +777,8 @@ function arrangeRhythm(
     const last = chain[chain.length - 1]
     frames = frames.filter((frame) => frame / fps < first || frame / fps >= last)
 
-    const ladderSteps = difficulty.isAdvanced ? chooseLadderSteps(steps) : new Set<number>()
+    const canLadder = (step: number) => intensityAt(intensity, chain[step], fps) >= ACTIVE_LEVEL
+    const ladderSteps = difficulty.isAdvanced ? chooseLadderSteps(steps, canLadder) : new Set<number>()
     for (let i = 0; i < steps.length; i++) {
       const slotSec = (chain[i + 1] - chain[i]) / STEP_SLOTS
       const toFrame = (slot: number) => Math.round((chain[i] + slot * slotSec) * fps)
@@ -782,7 +791,8 @@ function arrangeRhythm(
         continue
       }
       const isShort = chain[i + 1] - chain[i] < SHORT_STEP_SEC
-      for (const slot of chooseSlots(steps[i], difficulty, isSoft, isShort)) {
+      const isCalm = intensityAt(intensity, chain[i], fps) < CALM_LEVEL
+      for (const slot of chooseSlots(steps[i], difficulty, isSoft, isShort, isCalm)) {
         frames.push(toFrame(slot))
         rhythmic.push(toFrame(slot))
       }
@@ -796,6 +806,10 @@ function arrangeRhythm(
   return { frames: unique, ladder, rhythmic, beats }
 }
 
+function intensityAt(intensity: Float32Array, time: number, fps: number): number {
+  return intensity[Math.min(Math.max(0, Math.round(time * fps)), intensity.length - 1)]
+}
+
 /** Живая игра отбивает почти все удары на сетке, а не только сильные. */
 function allHeardFrames(analysis: AudioAnalysis, picked: number[]): number[] {
   const heard = [...picked]
@@ -806,12 +820,13 @@ function allHeardFrames(analysis: AudioAnalysis, picked: number[]): number[] {
 }
 
 /** В каждой фразе лесенкой становится шаг, где музыка сама звучит чаще всего. */
-function chooseLadderSteps(steps: Set<number>[]): Set<number> {
+function chooseLadderSteps(steps: Set<number>[], canLadder: (step: number) => boolean): Set<number> {
   const chosen = new Set<number>()
   for (let start = 0; start < steps.length; start += PHRASE_STEPS) {
     let best = -1
     for (let i = start; i < Math.min(start + PHRASE_STEPS, steps.length); i++) {
-      if (steps[i].size >= LADDER_MIN_HITS && (best === -1 || steps[i].size >= steps[best].size)) best = i
+      const isRich = steps[i].size >= LADDER_MIN_HITS && canLadder(i)
+      if (isRich && (best === -1 || steps[i].size >= steps[best].size)) best = i
     }
     if (best !== -1) chosen.add(best)
   }
@@ -819,11 +834,22 @@ function chooseLadderSteps(steps: Set<number>[]): Set<number> {
 }
 
 /** Обычный шаг: настоящие удары плюс опорные доли, чтобы рука не теряла ритм. */
-function chooseSlots(real: Set<number>, difficulty: Difficulty, isSoft: boolean, isShort: boolean): Set<number> {
+function chooseSlots(
+  real: Set<number>,
+  difficulty: Difficulty,
+  isSoft: boolean,
+  isShort: boolean,
+  isCalm: boolean,
+): Set<number> {
   // На коротком шаге все доли дали бы пять нажатий в секунду всю песню подряд
-  const slots = new Set([...real].filter((slot) => !isShort || slot % 2 === 0))
+  const slots = new Set([...real].filter((slot) => !(isShort || isCalm) || slot % 2 === 0))
   // На мягком пульсе ударов почти не слышно, поэтому рисунок «тук, ту-тук» держит сам шаг
   if (isSoft && difficulty.isAdvanced) slots.add(STEP_SLOTS - 1)
+  // Спокойной части хватает опоры на начало шага: иначе она сложнее припева
+  if (isCalm) {
+    slots.add(0)
+    return slots
+  }
   for (const share of difficulty.pulsePattern) slots.add(Math.round(share * STEP_SLOTS))
   return slots
 }
@@ -867,7 +893,7 @@ function addAudible(
     }
     const ratio = peak > 0 ? weights[i] / peak : 0
     const frameIntensity = intensity[Math.min(frames[i], intensity.length - 1)]
-    if (ratio >= share - ACTIVE_SHARE_DROP * frameIntensity) importance.set(frames[i], Math.max(importance.get(frames[i]) ?? 0, ratio))
+    if (ratio >= share + CALM_SHARE_RISE - ACTIVE_SHARE_DROP * frameIntensity) importance.set(frames[i], Math.max(importance.get(frames[i]) ?? 0, ratio))
   }
 }
 

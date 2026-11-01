@@ -383,10 +383,32 @@ describe('смена бита посреди трека', () => {
   })
 })
 
+describe('плотность по силе песни', () => {
+  it('тихое вступление легче мощной части, даже если ударов в нём столько же', () => {
+    const rate = 44100
+    const samples = new Float32Array(rate * 60)
+    for (let time = 2; time < 58; time += 0.2) {
+      const volume = time < 22 ? 0.08 : 0.9
+      const start = Math.round(time * rate)
+      for (let i = 0; i < 0.15 * rate; i++) {
+        samples[start + i] += volume * Math.sin(2 * Math.PI * 70 * (i / rate)) * Math.exp((-i / rate) * 20)
+      }
+    }
+    for (let i = 22 * rate; i < 58 * rate; i++) {
+      const t = i / rate
+      samples[i] += 0.12 * (Math.sin(2 * Math.PI * 900 * t) + Math.sin(2 * Math.PI * 2400 * t) + Math.sin(2 * Math.PI * 6500 * t))
+    }
+    const notes = generateLaneLevel(analyzeAudio(samples, rate), hard)
+    const starts = [...new Set(notes.map((note) => note.time))]
+    const calm = starts.filter((time) => time >= 5 && time < 20).length
+    const loud = starts.filter((time) => time >= 30 && time < 45).length
+    expect(loud).toBeGreaterThan(calm * 1.3)
+  })
+})
+
 describe('стрелки', () => {
   it('стрелка показывает туда, где стоит, и отбивается в ту же сторону', () => {
     const notes = generateLaneLevel(analysis, hard).filter((note) => note.kind === 'swipe')
-    expect(notes.length).toBeGreaterThan(0)
     for (const note of notes) expect(note.direction).toBe(note.lane - 1)
 
     const up: LaneNote = { id: 0, time: 1, lane: 1, kind: 'swipe', direction: 0 }

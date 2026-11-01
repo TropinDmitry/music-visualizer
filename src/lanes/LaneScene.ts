@@ -60,6 +60,9 @@ const NOTE_TILT = 0.6
 const PLANE_SQUASH = Math.sin(NOTE_TILT)
 /** Стрелка лежит внутри круга и занимает меньше его ширины. */
 const ARROW_IN_COIN = 0.62
+/** Круг сжат наклоном, поэтому стрелке вверх нужна длина, а боковым нет. */
+const UP_ARROW_LENGTH = 1.5
+const UP_ARROW_WIDTH = 1.1
 const COIN_WITH_ARROW_COLOR = '#ffffff'
 const ARROW_ON_COIN_COLOR = '#0d4a48'
 const FLYING_ARROW_COLOR = '#ffffff'
@@ -551,6 +554,12 @@ function createHaloTexture(): THREE.CanvasTexture {
   const texture = new THREE.CanvasTexture(canvas)
   texture.colorSpace = THREE.NoColorSpace
   return texture
+}
+
+/** Поворот стрелки вокруг оси круга: вправо, влево или от игрока. */
+function arrowHeading(direction: number): number {
+  if (direction === 0) return Math.PI / 2
+  return direction < 0 ? Math.PI : 0
 }
 
 function createArrowGeometry(): THREE.BufferGeometry {
@@ -1248,8 +1257,13 @@ export class LaneScene {
         // Стрелка приподнята над верхом круга, чтобы лежать на нём, а не внутри
         const lift = size * 0.13
         this.helper.position.set(x, y + lift * Math.cos(NOTE_TILT), lift * Math.sin(NOTE_TILT))
-        this.helper.rotation.set(NOTE_TILT, note.direction < 0 ? Math.PI : 0, note.direction === 0 ? -Math.PI / 2 : 0)
+        this.helper.rotation.set(NOTE_TILT, arrowHeading(note.direction), 0)
         this.helper.scale.setScalar(size * ARROW_IN_COIN)
+        // Круг наклонён и сжат по вертикали: стрелку вверх сжимает вдоль, возвращаем ей длину
+        if (note.direction === 0) {
+          this.helper.scale.x *= UP_ARROW_LENGTH
+          this.helper.scale.z *= UP_ARROW_WIDTH
+        }
         this.helper.updateMatrix()
         this.swipeNotes.setMatrixAt(swipeCount, this.helper.matrix)
         this.swipeNotes.setColorAt(swipeCount, this.color.set(ARROW_ON_COIN_COLOR))
@@ -1336,10 +1350,9 @@ export class LaneScene {
       }
       // Квадрат даёт разгон: стрелка срывается с места и уходит за край экрана
       const flight = age * age
-      const heading = arrow.direction < 0 ? Math.PI : 0
       const rise = arrow.direction === 0 ? flight * 3.2 : 0
       arrow.mesh.position.set(arrow.startX + arrow.direction * flight * 3.2, HIT_Y + rise, 0.1)
-      arrow.mesh.rotation.set(NOTE_TILT, heading, arrow.direction === 0 ? -Math.PI / 2 : 0)
+      arrow.mesh.rotation.set(NOTE_TILT, arrowHeading(arrow.direction), 0)
       arrow.mesh.scale.setScalar(NOTE_SIZE * ARROW_IN_COIN * (this.spread / LANE_SPREAD) * (1 + 0.9 * age))
       arrow.mesh.material.uniforms.uOpacity.value = 1 - age * age
     }
