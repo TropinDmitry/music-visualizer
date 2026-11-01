@@ -34,7 +34,7 @@ export interface LaneNote {
   time: number
   lane: number
   kind: NoteKind
-  /** Только у свайпа: -1 влево, 1 вправо. */
+  /** Только у свайпа: -1 влево, 1 вправо, 0 вверх. Зависит от дорожки. */
   direction: number
   /** Только у ноты с лучом: сколько секунд держать. */
   duration?: number
@@ -159,6 +159,13 @@ const ARROW_LOOK_BACK_SEC = 3
 /** За сколько секунд до конца фразы идут стрелки и сколько места вокруг них оставить. */
 const PHRASE_ARROW_LEADS = [1.03, 0.64, 0.34]
 const PHRASE_ARROW_CLEAR_SEC = 0.2
+/** Порядок дорожек в тройке меняется от серии к серии. */
+const ARROW_LANE_ORDERS = [
+  [0, 2, 1],
+  [2, 0, 1],
+  [1, 0, 2],
+  [1, 2, 0],
+]
 /** Парные ноты на смене ритма не чаще этого: иначе акценты теряют вес. */
 const MIN_ACCENT_GAP_SEC = 12
 /** Смену части ищем рядом с найденным событием, чтобы попасть в реальный удар. */
@@ -168,6 +175,9 @@ const LONG_PAUSE_SEC = 0.55
 const SUSTAIN_HOLD_MAX_SEC = 6
 const SUSTAIN_HOLD_GAP_SEC = 0.35
 const SUSTAIN_END_KEEP_SEC = 0.1
+/** Такая тишина перед лучом уже заметна как опоздание, а дальше это другая часть песни. */
+const SUSTAIN_LATE_SEC = 0.7
+const SUSTAIN_STRETCH_SEC = 3
 /** Пробел рядом с началом протяжного звука мешает: на этом месте главный луч. */
 const SPACE_SUSTAIN_CLEAR_SEC = 1.5
 /** Пара дорожек для протяжного звука: всегда одна и та же, крайние. */
@@ -266,7 +276,7 @@ function placePhraseArrows(
   moments: Moment[],
 ): LaneNote[] {
   let result = notes
-  let direction = 1
+  let serie = 0
   const arrows: LaneNote[] = []
   const count = Math.min(difficulty.arrowRun, PHRASE_ARROW_LEADS.length)
   const leads = PHRASE_ARROW_LEADS.slice(PHRASE_ARROW_LEADS.length - count)
@@ -276,14 +286,21 @@ function placePhraseArrows(
     const first = end - leads[0] - PHRASE_ARROW_CLEAR_SEC
     const last = end - leads[leads.length - 1] + PHRASE_ARROW_CLEAR_SEC
     result = result.filter((note) => note.time < first || note.time > last)
-    for (const lead of leads) {
-      arrows.push({ id: 0, time: end - lead, lane: 1, kind: 'swipe', direction })
-      direction = -direction
-    }
+    const lanes = ARROW_LANE_ORDERS[serie % ARROW_LANE_ORDERS.length]
+    serie += 1
+    leads.forEach((lead, index) => {
+      const lane = lanes[index % lanes.length]
+      arrows.push({ id: 0, time: end - lead, lane, kind: 'swipe', direction: arrowDirection(lane) })
+    })
   }
   const merged = [...result, ...arrows]
   merged.sort((a, b) => a.time - b.time)
   return merged
+}
+
+/** Стрелка показывает туда, где стоит: слева влево, справа вправо, по центру вверх. */
+function arrowDirection(lane: number): number {
+  return lane - 1
 }
 
 /** Серия ровных чётких ударов, кандидат на стрелки. */
@@ -319,7 +336,6 @@ function placeArrowSeries(
   chosen.sort((a, b) => a.hits[0].time - b.hits[0].time)
 
   const removed = new Set<LaneNote>()
-  let direction = 1
   for (const series of chosen) {
     const first = series.hits[0].time - ARROW_CLEAR_SEC
     const last = series.hits[series.hits.length - 1].time + ARROW_CLEAR_SEC
@@ -328,8 +344,7 @@ function placeArrowSeries(
     }
     for (const hit of series.hits) {
       hit.kind = 'swipe'
-      hit.direction = direction
-      direction = -direction
+      hit.direction = arrowDirection(hit.lane)
     }
   }
   return notes.filter((note) => !removed.has(note))
@@ -524,7 +539,13 @@ function addSustainHolds(notes: LaneNote[], difficulty: Difficulty, sustains: Mo
     // Конец не трогаем: звук кончается ударом, и этот удар и есть нота
     result = result.filter((note) => note.time < start || note.time >= sustain.end - SUSTAIN_END_KEEP_SEC)
 
-    let time = sustain.start
+    // Если перед лучом игра уже молчит, он начинается с последней ноты: иначе выйдет с опозданием
+    const previous = lastNoteBefore(result, sustain.start)
+    const silence = previous ? sustain.start - previous.time : 0
+    const startsEarlier = previous !== null && silence >= SUSTAIN_LATE_SEC && silence <= SUSTAIN_STRETCH_SEC
+    if (startsEarlier) result = result.filter((note) => note.time !== previous.time)
+
+    let time = startsEarlier ? previous.time : sustain.start
     while (sustain.end - time >= HOLD_MIN_SEC) {
       const duration = Math.min(SUSTAIN_HOLD_MAX_SEC, sustain.end - time)
       const lanes = difficulty.doubleHolds ? SUSTAIN_LANES : [1]
@@ -535,6 +556,14 @@ function addSustainHolds(notes: LaneNote[], difficulty: Difficulty, sustains: Mo
   const merged = [...result, ...holds]
   merged.sort((a, b) => a.time - b.time)
   return merged
+}
+
+function lastNoteBefore(notes: LaneNote[], time: number): LaneNote | null {
+  let last: LaneNote | null = null
+  for (const note of notes) {
+    if (note.time < time && (note.kind === 'tap' || note.kind === 'star' || note.kind === 'accent')) last = note
+  }
+  return last
 }
 
 /**

@@ -206,7 +206,7 @@ export function pressSpace(game: LaneGame, time: number): LaneEvent | null {
   return judgeNearest(game, time, (note) => note.kind === 'space')
 }
 
-/** Свайп стрелкой: подходит любая дорожка, важно только направление. */
+/** Стрелка: важно только направление, -1 влево, 1 вправо, 0 вверх. */
 export function pressSwipe(game: LaneGame, time: number, direction: number): LaneEvent | null {
   return judgeNearest(game, time, (note) => note.kind === 'swipe' && note.direction === direction)
 }

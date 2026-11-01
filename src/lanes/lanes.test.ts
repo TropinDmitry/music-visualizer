@@ -81,7 +81,7 @@ describe('generateLaneLevel', () => {
     }
   })
 
-  it('есть стрелки в обе стороны', () => {
+  it('есть стрелки во все три стороны', () => {
     const relaxed = new Float32Array(44100 * 40)
     for (let time = 2; time < 38; time += 0.9) {
       const volume = time < 26 ? 0.2 : 0.9
@@ -92,7 +92,7 @@ describe('generateLaneLevel', () => {
       }
     }
     const swipes = generateLaneLevel(analyzeAudio(relaxed, 44100), hard).filter((note) => note.kind === 'swipe')
-    expect(new Set(swipes.map((note) => note.direction))).toEqual(new Set([-1, 1]))
+    expect(new Set(swipes.map((note) => note.direction))).toEqual(new Set([-1, 0, 1]))
   })
 
   it('звёзды редкие и не занимают место стрелок', () => {
@@ -380,6 +380,19 @@ describe('смена бита посреди трека', () => {
     const before = notes.filter((note) => note.time >= 5 && note.time < 18).length
     const after = notes.filter((note) => note.time >= 22 && note.time < 35).length
     expect(after).toBeGreaterThan(before * 0.7)
+  })
+})
+
+describe('стрелки', () => {
+  it('стрелка показывает туда, где стоит, и отбивается в ту же сторону', () => {
+    const notes = generateLaneLevel(analysis, hard).filter((note) => note.kind === 'swipe')
+    expect(notes.length).toBeGreaterThan(0)
+    for (const note of notes) expect(note.direction).toBe(note.lane - 1)
+
+    const up: LaneNote = { id: 0, time: 1, lane: 1, kind: 'swipe', direction: 0 }
+    const game = createLaneGame([up], easy)
+    expect(pressSwipe(game, 1, 1)).toBeNull()
+    expect(pressSwipe(game, 1, 0)?.type).toBe('perfect')
   })
 })
 

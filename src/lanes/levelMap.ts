@@ -66,13 +66,14 @@ const report = document.querySelector<HTMLElement>('#report')!
 const audio = new Audio()
 
 /** Какая дорожка рентгена у какой клавиши. Стрелки и пробел рисуем отдельной строкой. */
-const KEY_ROWS: Record<string, number> = { a: 0, s: 1, d: 2, left: 3, right: 3, space: 3 }
+const KEY_ROWS: Record<string, number> = { a: 0, s: 1, d: 2, left: 3, right: 3, up: 3, space: 3 }
 const KEY_NAMES: Record<string, string> = {
   KeyA: 'a',
   KeyS: 's',
   KeyD: 'd',
   ArrowLeft: 'left',
   ArrowRight: 'right',
+  ArrowUp: 'up',
   Space: 'space',
 }
 
@@ -523,7 +524,7 @@ function drawLanes(
     if (note.kind === 'swipe') {
       ctx.font = 'bold 18px system-ui'
       ctx.textAlign = 'center'
-      ctx.fillText(note.direction > 0 ? '→' : '←', x, y + 6)
+      ctx.fillText(note.direction === 0 ? '↑' : note.direction > 0 ? '→' : '←', x, y + 6)
       ctx.textAlign = 'left'
       continue
     }

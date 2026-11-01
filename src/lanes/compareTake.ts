@@ -9,7 +9,7 @@ import type { LaneNote } from './level.ts'
 
 export interface Press {
   time: number
-  /** a, s, d, left, right или space. */
+  /** a, s, d, left, up, right или space. */
   key: string
   /** Сколько клавишу держали, в секундах. */
   duration: number

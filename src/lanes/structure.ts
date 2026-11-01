@@ -47,6 +47,8 @@ const SUSTAIN_STEP_SEC = 0.25
 const SUSTAIN_WINDOW_SEC = 1.5
 const SUSTAIN_MIN_SEC = 1.5
 const SUSTAIN_MERGE_GAP_SEC = 1
+/** Такой промежуток без ударов уже похож на затишье, а не на рисунок ритма. */
+const SUSTAIN_QUIET_GAP_SEC = 0.5
 /** Мягкая пульсация: сравниваем спектр до и после момента, ударов тут детектор не видит. */
 const PULSE_STEP_FRAMES = 3
 const PULSE_SIDE_FRAMES = 4
@@ -504,12 +506,22 @@ function walkChain(peaks: number[], start: number, period: number): number[] {
   return chain.slice(0, chain.length - misses)
 }
 
-/** Звук начинается с самой сильной смены рядом с местом, где участок признан протяжным. */
+/**
+ * Где начался протяжный звук. Обычно это последний удар перед затишьем: дальше
+ * играет только протяжка. Если ударов рядом нет, берём самую сильную смену звука.
+ */
 function soundStart(analysis: AudioAnalysis, detected: number): number {
-  // Окно подсчёта ударов центрировано, поэтому звук мог начаться и до, и после
-  const reach = SUSTAIN_WINDOW_SEC / 2
+  const from = detected - SUSTAIN_WINDOW_SEC
+  const to = detected + SUSTAIN_WINDOW_SEC / 2
+  const onsets = analysis.onsetTimes
+  for (let i = 0; i < onsets.length; i++) {
+    if (onsets[i] < from || onsets[i] > to) continue
+    const next = i + 1 < onsets.length ? onsets[i + 1] : analysis.duration
+    if (next - onsets[i] >= SUSTAIN_QUIET_GAP_SEC) return onsets[i]
+  }
+
   let best: SoundChange | null = null
-  for (const change of spectrumChanges(analysis, detected - reach, detected + reach)) {
+  for (const change of spectrumChanges(analysis, from, to)) {
     if (!best || change.size > best.size) best = change
   }
   return best ? best.time : detected

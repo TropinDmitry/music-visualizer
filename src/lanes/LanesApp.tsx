@@ -105,6 +105,7 @@ interface GameResult {
 interface ActiveTouch {
   lane: number
   startX: number
+  startY: number
   hasSwiped: boolean
 }
 
@@ -535,6 +536,10 @@ export function LanesApp() {
       }
       if (event.code === 'ArrowLeft') handlersRef.current.swipe(-1)
       if (event.code === 'ArrowRight') handlersRef.current.swipe(1)
+      if (event.code === 'ArrowUp') {
+        event.preventDefault() // иначе страница прокрутится
+        handlersRef.current.swipe(0)
+      }
       if (event.code === 'Space') {
         event.preventDefault() // иначе пробел нажмёт кнопку, на которой фокус
         handlersRef.current.space()
@@ -573,19 +578,20 @@ export function LanesApp() {
     }
     const x = (event.clientX - (box.left + box.width / 2)) / (box.height / 2)
     const lane = scene.laneAt(x)
-    touchesRef.current.set(event.pointerId, { lane, startX: event.clientX, hasSwiped: false })
+    touchesRef.current.set(event.pointerId, { lane, startX: event.clientX, startY: event.clientY, hasSwiped: false })
     pressedLanesRef.current[lane] = true
     handlersRef.current.lane(lane)
   }
 
-  /** Смахивание в сторону отбивает стрелку: на телефоне нет клавиш ← и →. */
+  /** Смахивание отбивает стрелку: на телефоне нет клавиш ← ↑ →. */
   const handlePointerMove = (event: PointerEvent) => {
     const touch = touchesRef.current.get(event.pointerId)
     if (!touch || touch.hasSwiped) return
-    const distance = event.clientX - touch.startX
-    if (Math.abs(distance) < SWIPE_MIN_PX) return
+    const sideways = event.clientX - touch.startX
+    const upward = touch.startY - event.clientY
+    if (Math.max(Math.abs(sideways), upward) < SWIPE_MIN_PX) return
     touch.hasSwiped = true
-    handlersRef.current.swipe(Math.sign(distance))
+    handlersRef.current.swipe(upward > Math.abs(sideways) ? 0 : Math.sign(sideways))
   }
 
   const handlePointerUp = (event: PointerEvent) => {
@@ -762,7 +768,7 @@ export function LanesApp() {
             </span>
           ))}
 
-          <div className="hud-hint">A S D — круги · ← → — стрелки · пробел — SPACE · Esc — пауза</div>
+          <div className="hud-hint">A S D — круги · ← ↑ → — стрелки · пробел — SPACE · Esc — пауза</div>
         </div>
       )}
 
@@ -968,7 +974,7 @@ export function LanesApp() {
 
           <ul className="legend">
             <li>Пурпурный круг: клавиша A, S, D или нажатие на дорожку</li>
-            <li>Белый круг со стрелкой: ← или → либо смахивание, вокруг неё всегда есть свободное место</li>
+            <li>Белый круг со стрелкой: ← ↑ → либо смахивание в ту же сторону, вокруг неё всегда есть свободное место</li>
             <li>Золотая звезда: три звезды включают суперрежим, очки ×2 на 8 секунд</li>
             <li>Пурпурный круг с лучом: зажмите и держите до конца</li>
             <li>Парная нота: две клавиши сразу</li>
