@@ -95,6 +95,8 @@ const HOLD_EVERY = 14
 /** Каждый такой луч на сложной сложности двойной. */
 const DOUBLE_HOLD_EVERY = 3
 const HOLD_END_GAP_SEC = 0.1
+/** Огрызок луча перед пробелом не нужен. */
+const SPACE_TRIMMED_HOLD_MIN_SEC = 0.5
 /** Луч на доле: такая часть шага, как в живой игре. */
 const BEAT_HOLD_SHARE = 0.8
 const BEAT_HOLD_REST_SEC = 0.5
@@ -176,7 +178,7 @@ const SUSTAIN_HOLD_MAX_SEC = 6
 const SUSTAIN_HOLD_GAP_SEC = 0.35
 const SUSTAIN_END_KEEP_SEC = 0.1
 /** Такая тишина перед лучом уже заметна как опоздание, а дальше это другая часть песни. */
-const SUSTAIN_LATE_SEC = 0.7
+const SUSTAIN_LATE_SEC = 1.2
 const SUSTAIN_STRETCH_SEC = 3
 /** Пробел рядом с началом протяжного звука мешает: на этом месте главный луч. */
 const SPACE_SUSTAIN_CLEAR_SEC = 1.5
@@ -261,7 +263,7 @@ export function generateLaneLevel(
   const withAccents = addAccents(withHolds, moments, sections, sustains)
   if (trace) trace.beforeLimit = withAccents
   // Последним: предыдущие шаги убирают ноты, и соседями могут оказаться ноты с одной дорожки
-  return avoidTriples(dropNotesUnderBeams(limitDensity(withAccents, difficulty)), isLadder)
+  return avoidTriples(dropNotesUnderBeams(trimBeamsAtSpaces(limitDensity(withAccents, difficulty))), isLadder)
 }
 
 /**
@@ -444,7 +446,9 @@ function addHolds(
       const step = beats.get(frame)
       if (step && soundSwells(analysis, frame)) duration = step * BEAT_HOLD_SHARE
     } else if (isFree && notesSinceHold >= HOLD_EVERY && !isLadder(note)) {
-      const possible = holdDuration(notes, i, moments, isLadder)
+      // Луч по счётчику не заходит на ритм: там лучи ставит сам звук
+      const isBusy = (other: LaneNote) => isLadder(other) || rhythmic.has(Math.round(other.time * analysis.fps))
+      const possible = holdDuration(notes, i, moments, isBusy)
       if (possible >= HOLD_MIN_SEC) duration = possible
     }
     if (duration === 0) {
@@ -461,18 +465,36 @@ function addHolds(
 
     // На простых сложностях рука одна: пока держишь луч, других нот нет
     for (let j = i + 1; j < notes.length && notes[j].time < note.time + duration; j++) {
-      const isOnHeldLane = lanes.includes(notes[j].lane) && notes[j].kind !== 'swipe'
-      if (isOnHeldLane || !difficulty.isAdvanced) skipped.add(notes[j])
+      if (lanes.includes(notes[j].lane) || !difficulty.isAdvanced) skipped.add(notes[j])
     }
   }
   return result
 }
 
-/** Парные ноты ставятся после лучей и могут попасть под луч, а нажать там нельзя. */
+/** Пробел идёт на все дорожки: луч заканчивается до него, чтобы ничего не пересекалось. */
+function trimBeamsAtSpaces(notes: LaneNote[]): LaneNote[] {
+  const spaces = notes.filter((note) => note.kind === 'space')
+  const result: LaneNote[] = []
+  for (const note of notes) {
+    if (note.kind !== 'hold') {
+      result.push(note)
+      continue
+    }
+    let end = note.time + (note.duration ?? 0)
+    for (const space of spaces) {
+      if (space.time >= note.time && space.time < end) end = space.time - HOLD_END_GAP_SEC
+    }
+    const duration = end - note.time
+    if (duration >= SPACE_TRIMMED_HOLD_MIN_SEC) result.push({ ...note, duration })
+  }
+  return result
+}
+
+/** На дорожке луча не должно быть ничего другого: это сбивает с толку. */
 function dropNotesUnderBeams(notes: LaneNote[]): LaneNote[] {
   return notes.filter((note, index) => {
-    const canPress = note.kind === 'hold' || note.kind === 'swipe' || note.kind === 'space'
-    return canPress || !isLaneHeld(notes, index, note.lane)
+    if (note.kind === 'hold' || note.kind === 'space') return true
+    return !isLaneHeld(notes, index, note.lane)
   })
 }
 
@@ -515,11 +537,11 @@ function holdDuration(
   notes: LaneNote[],
   start: number,
   moments: Moment[],
-  isLadder: (note: LaneNote) => boolean,
+  isBusy: (note: LaneNote) => boolean,
 ): number {
   let end = notes[start].time + HOLD_MAX_SEC
   for (let j = start + 1; j < notes.length && notes[j].time < end; j++) {
-    if (isLadder(notes[j]) || notes[j].kind === 'hold') end = notes[j].time - HOLD_END_GAP_SEC
+    if (isBusy(notes[j]) || notes[j].kind === 'hold') end = notes[j].time - HOLD_END_GAP_SEC
   }
   for (const moment of moments) {
     if (moment.kind === 'pause' && moment.start > notes[start].time && moment.start < end) end = moment.start

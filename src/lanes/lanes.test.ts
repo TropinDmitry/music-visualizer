@@ -108,10 +108,10 @@ describe('generateLaneLevel', () => {
       for (const hold of notes.filter((note) => note.kind === 'hold')) {
         const end = hold.time + (hold.duration ?? 0)
         for (const note of notes) {
-          // Стрелки и пробел не привязаны к дорожке
-          const isTied = note.kind !== 'swipe' && note.kind !== 'space'
-          const isUnderBeam = isTied && note.time > hold.time && note.time < end
-          expect(isUnderBeam && note.lane === hold.lane).toBe(false)
+          // На дорожке луча нет ничего другого, а пробел не пересекает лучи вообще
+          const isUnderBeam = note.time > hold.time && note.time < end
+          expect(isUnderBeam && note.kind !== 'hold' && note.lane === hold.lane).toBe(false)
+          expect(isUnderBeam && note.kind === 'space').toBe(false)
         }
       }
     }

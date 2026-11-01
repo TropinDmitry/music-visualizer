@@ -1248,7 +1248,7 @@ export class LaneScene {
         // Стрелка приподнята над верхом круга, чтобы лежать на нём, а не внутри
         const lift = size * 0.13
         this.helper.position.set(x, y + lift * Math.cos(NOTE_TILT), lift * Math.sin(NOTE_TILT))
-        this.helper.rotation.set(NOTE_TILT, note.direction < 0 ? Math.PI : 0, note.direction === 0 ? Math.PI / 2 : 0)
+        this.helper.rotation.set(NOTE_TILT, note.direction < 0 ? Math.PI : 0, note.direction === 0 ? -Math.PI / 2 : 0)
         this.helper.scale.setScalar(size * ARROW_IN_COIN)
         this.helper.updateMatrix()
         this.swipeNotes.setMatrixAt(swipeCount, this.helper.matrix)
@@ -1339,7 +1339,7 @@ export class LaneScene {
       const heading = arrow.direction < 0 ? Math.PI : 0
       const rise = arrow.direction === 0 ? flight * 3.2 : 0
       arrow.mesh.position.set(arrow.startX + arrow.direction * flight * 3.2, HIT_Y + rise, 0.1)
-      arrow.mesh.rotation.set(NOTE_TILT, heading, arrow.direction === 0 ? Math.PI / 2 : 0)
+      arrow.mesh.rotation.set(NOTE_TILT, heading, arrow.direction === 0 ? -Math.PI / 2 : 0)
       arrow.mesh.scale.setScalar(NOTE_SIZE * ARROW_IN_COIN * (this.spread / LANE_SPREAD) * (1 + 0.9 * age))
       arrow.mesh.material.uniforms.uOpacity.value = 1 - age * age
     }
