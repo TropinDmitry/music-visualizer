@@ -775,7 +775,7 @@ export function LanesApp() {
       {screen === 'menu' && (
         <main className="menu">
           <header>
-            <h1>ТРИАДА</h1>
+            <h1>TAP YOUR TRACK</h1>
             <p>Три дорожки, ваша музыка и ваш клип, переработанный на весь экран.</p>
           </header>
 

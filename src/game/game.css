@@ -69,7 +69,10 @@ p {
   grid-template-columns: minmax(0, 340px) minmax(0, 340px);
   gap: 16px;
   justify-content: center;
-  align-content: center;
+  /* Высокое меню при обычном центрировании уходит верхом за край, и туда не прокрутить.
+     safe этого не допускает; старые браузеры его не знают и берут строку выше */
+  align-content: start;
+  align-content: safe center;
   padding: 24px 16px;
 }
 

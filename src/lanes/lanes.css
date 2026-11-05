@@ -400,3 +400,10 @@
   font-size: 13px;
   opacity: 0.7;
 }
+
+/* Название длиннее, чем было: так оно помещается в одну строку на компьютере */
+.menu header h1 {
+  font-size: clamp(32px, 6vw, 60px);
+  letter-spacing: 0.16em;
+  margin-right: -0.16em;
+}
