@@ -5,7 +5,9 @@ import {
   findPhraseEnds,
   findSections,
   findSoftPulses,
+  chainStep,
   findSongParts,
+  isSongTempo,
   findSustains,
   songIntensity,
   splitAtBigChanges,
@@ -245,9 +247,12 @@ export function generateLaneLevel(
   const moments = findMoments(analysis)
   const intensity = songIntensity(analysis)
   const rawSustains = splitAtBigChanges(analysis, findSustains(analysis))
-  const pulses = findSoftPulses(analysis, rawSustains)
+  const foundPulses = findSoftPulses(analysis, rawSustains)
+  const firstParts = findSongParts(analysis, withoutPulses(rawSustains, foundPulses), foundPulses)
+  // Мягкий пульс верен, только если он идёт в темпе самой песни: иначе это случайные смены аккордов
+  const pulses = isPulseInTempo(foundPulses, firstParts) ? foundPulses : []
   const sustains = withoutPulses(rawSustains, pulses)
-  const parts = findSongParts(analysis, sustains, pulses)
+  const parts = pulses === foundPulses ? firstParts : findSongParts(analysis, sustains, pulses)
   const picked = pickFramesWithMoments(analysis, difficulty, moments, focus, intensity, trace)
   const softChains = focus === 'voice' ? [] : splitPulses(pulses)
   const reading = findReadingSpans(analysis, parts, sustains, focus)
@@ -791,6 +796,12 @@ function pickSyllables(
     previous = time
   }
   return picked
+}
+
+function isPulseInTempo(pulses: number[], parts: SongPart[]): boolean {
+  if (pulses.length < 2) return pulses.length === 0
+  const chains = splitPulses(pulses).filter((chain) => chain.length > 1)
+  return chains.every((chain) => isSongTempo(parts, chainStep(chain)))
 }
 
 /** Мягкий пульс лежит одним списком: разрезаем его на отдельные цепочки. */

@@ -73,6 +73,9 @@ const PART_SEC = 8
 /** Ритм выражен ярко, если настоящих ударов в цепочке не меньше этой доли. */
 const RHYTHM_HIT_SHARE = 0.6
 const RHYTHM_MIN_HITS = 5
+/** Темп считается темпом песни, если встретился хотя бы в стольких отрезках. */
+const TEMPO_MIN_PARTS = 3
+const TEMPO_TOLERANCE = 0.03
 /** Шаг короче этого удваиваем: рисунок на него не ляжет, рука не успеет. */
 const RHYTHM_MIN_STEP_SEC = 0.6
 /** И она должна быть внезапной: плавный взлёт тона меняет спектр постоянно. */
@@ -321,7 +324,36 @@ export function findSongParts(analysis: AudioAnalysis, sustains: Moment[], softP
     const isClear = chain.length > 0 && hits / chain.length >= RHYTHM_HIT_SHARE
     parts.push({ start, end, chain: isClear ? longEnoughStep(chain) : [] })
   }
-  return parts
+  return keepSteadyTempo(parts)
+}
+
+/** Шаг цепочки в секундах. */
+export function chainStep(chain: number[]): number {
+  return (chain[chain.length - 1] - chain[0]) / (chain.length - 1)
+}
+
+/** Есть ли в песне отрезки с ритмом, шаг которого близок к этому. */
+export function isSongTempo(parts: SongPart[], step: number): boolean {
+  return parts.some((part) => part.chain.length > 1 && isSameStep(chainStep(part.chain), step))
+}
+
+/**
+ * Настоящий ритм держит один темп через всю песню или большие её куски. В живой
+ * оркестровой музыке темп дышит, и цепочки находятся случайно, каждый раз с другим
+ * шагом. Оставляем только те, чей шаг повторяется хотя бы в нескольких отрезках.
+ */
+function keepSteadyTempo(parts: SongPart[]): SongPart[] {
+  const steps = parts.filter((part) => part.chain.length > 1).map((part) => chainStep(part.chain))
+  return parts.map((part) => {
+    if (part.chain.length < 2) return part
+    const step = chainStep(part.chain)
+    const twins = steps.filter((other) => isSameStep(other, step)).length
+    return twins >= TEMPO_MIN_PARTS ? part : { ...part, chain: [] }
+  })
+}
+
+function isSameStep(a: number, b: number): boolean {
+  return Math.abs(a - b) <= Math.max(a, b) * TEMPO_TOLERANCE
 }
 
 function longEnoughStep(chain: number[]): number[] {
