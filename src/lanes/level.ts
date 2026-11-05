@@ -98,8 +98,8 @@ const STAR_EVERY = 17
 /** Короче этого луч теряет смысл. */
 const HOLD_MIN_SEC = 0.9
 const HOLD_MAX_SEC = 2.5
-/** Примерно через столько нот обычная нота становится нотой с лучом. */
-const HOLD_EVERY = 14
+/** Долгая нота мелодии становится лучом, если держится хотя бы столько. */
+const MELODY_HOLD_MIN_SEC = 1.1
 /** Каждый такой луч на сложной сложности двойной. */
 const DOUBLE_HOLD_EVERY = 3
 const HOLD_END_GAP_SEC = 0.1
@@ -175,27 +175,19 @@ const LEAD_IN_SEC = 1.5
 /** Раньше этого нот нет: песня только началась. */
 const FIRST_NOTE_SEC = 3
 const TAIL_FRAMES = 15
-/** Вокруг серии стрелок игра освобождает место: руке нужно время перейти на другие клавиши. */
-const ARROW_CLEAR_SEC = 0.3
-/** Серия «пам-пам-пам»: неторопливые удары на равном расстоянии. */
-const ARROW_MIN_HITS = 3
-const ARROW_MIN_GAP_SEC = 0.26
-const ARROW_MAX_GAP_SEC = 0.9
-const ARROW_EVEN_SHARE = 0.18
-/** Во сколько раз удар серии сильнее того, что звучит между ударами. */
-const ARROW_MIN_CLARITY = 1.6
-/** Сколько секунд перед серией берём для сравнения: удары должны выделяться. */
-const ARROW_LOOK_BACK_SEC = 3
-/** За сколько секунд до конца фразы идут стрелки и сколько места вокруг них оставить. */
-const PHRASE_ARROW_LEADS = [1.03, 0.64, 0.34]
-const PHRASE_ARROW_CLEAR_SEC = 0.2
-/** Порядок дорожек в тройке меняется от серии к серии. */
-const ARROW_LANE_ORDERS = [
-  [0, 2, 1],
-  [2, 0, 1],
-  [1, 0, 2],
-  [1, 2, 0],
-]
+/** Ширина группы стрелок вокруг заметного удара. */
+const ARROW_WINDOW_SEC = 1.6
+/** Где у конца фразы ищем самый заметный удар. */
+const ARROW_SEARCH_SEC = 3
+const ARROW_SEARCH_AFTER_SEC = 0.5
+/** Стрелкой становится удар не слабее этой доли самого сильного в окне. */
+const ARROW_STRONG_SHARE = 0.5
+const ARROW_MIN_SPACING_SEC = 0.2
+/** С чем сравниваем удар, чтобы понять, выделяется ли он. */
+const ARROW_CONTRAST_SEC = 0.5
+const ARROW_CONTRAST_FLOOR = 0.02
+/** Совсем вплотную к стрелке обычную ноту не сыграть: руке надо перейти на стрелки. */
+const ARROW_CLEAR_SEC = 0.12
 /** Парные ноты на смене ритма не чаще этого: иначе акценты теряют вес. */
 const MIN_ACCENT_GAP_SEC = 12
 /** Смену части ищем рядом с найденным событием, чтобы попасть в реальный удар. */
@@ -213,7 +205,14 @@ const SPACE_SUSTAIN_CLEAR_SEC = 1.5
 /** Пара дорожек для протяжного звука: всегда одна и та же, крайние. */
 const SUSTAIN_LANES = [0, 2]
 /** Пробел событие редкое: два рядом обесценивают друг друга. */
-const MIN_SPACE_GAP_SEC = 8
+const MIN_SPACE_GAP_SEC = 15
+/** Тишина для пробела: хотя бы столько и втрое тише того, что было до неё. */
+const SPACE_SILENCE_SEC = 0.8
+const SPACE_SILENCE_SHARE = 0.3
+const SPACE_LOOK_SEC = 3
+const SPACE_EDGE_SEC = 3
+/** Подъём силы песни на границе части, после которого стоит пробел. */
+const SPACE_MIN_RISE = 0.35
 
 /** Что происходило внутри генератора: нужно только странице-рентгену. */
 export interface LevelTrace {
@@ -288,10 +287,7 @@ export function generateLaneLevel(
   markLastNotesBeforePauses(notes, moments)
   const sections = findSections(analysis, intensity)
   const phraseEnds = focus === 'voice' ? [] : findPhraseEnds(analysis, [...softChains, ...chains], moments)
-  const withArrows =
-    phraseEnds.length > 0
-      ? placePhraseArrows(notes, phraseEnds, difficulty, sustains, moments, (time) => intensityAt(intensity, time, analysis.fps))
-      : placeArrowSeries(notes, difficulty, analysis, sustains)
+  const withArrows = placeArrowAccents(notes, analysis, difficulty, phraseEnds, sustains, moments)
   // Быструю читку не разбиваем парами и лучами: это один поток слогов
   const ladderFrames = new Set([...ladder, ...syllables])
   const isLadder = (note: LaneNote) => ladderFrames.has(Math.round(note.time * analysis.fps))
@@ -299,45 +295,86 @@ export function generateLaneLevel(
   const withSustains = addSustainHolds(withPairs, difficulty, sustains)
   const rhythmicFrames = new Set(rhythmic)
   const withHolds = addHolds(withSustains, difficulty, moments, isLadder, analysis, beats, rhythmicFrames)
-  const withAccents = addAccents(withHolds, moments, sections, sustains)
+  const withAccents = addAccents(withHolds, moments, sections, sustains, analysis, intensity)
   if (trace) trace.beforeLimit = withAccents
   // Последним: предыдущие шаги убирают ноты, и соседями могут оказаться ноты с одной дорожки
   return avoidTriples(dropNotesUnderBeams(trimBeamsAtSpaces(limitDensity(withAccents, difficulty))), isLadder)
 }
 
 /**
- * Живая игра показала: стрелки идут тройкой перед концом фразы, как подводка к
- * следующему блоку. Смещения взяты из записи, в секундах от конца фразы.
+ * Стрелки ставятся на самые сильные удары: перед концом фразы, а если фраз нет,
+ * в каждом отрезке песни. Сколько их, решает музыка: столько, сколько рядом
+ * по-настоящему сильных ударов, от одной до предела сложности. Ноты вокруг
+ * не убираются, стрелка это просто другой жест на том же ударе.
  */
-function placePhraseArrows(
+function placeArrowAccents(
   notes: LaneNote[],
-  phraseEnds: number[],
+  analysis: AudioAnalysis,
   difficulty: Difficulty,
+  phraseEnds: number[],
   sustains: Moment[],
   moments: Moment[],
-  levelAt: (time: number) => number,
 ): LaneNote[] {
-  let result = notes
-  let serie = 0
-  const arrows: LaneNote[] = []
-  const count = Math.min(difficulty.arrowRun, PHRASE_ARROW_LEADS.length)
-  const leads = PHRASE_ARROW_LEADS.slice(PHRASE_ARROW_LEADS.length - count)
-  for (const end of phraseEnds) {
-    const isPause = leads.some((lead) => end - lead < FIRST_NOTE_SEC || !isAllowed(end - lead, moments))
-    if (isPause || levelAt(end - leads[0]) < CALM_LEVEL || isNearSustain(end - leads[0], sustains)) continue
-    const first = end - leads[0] - PHRASE_ARROW_CLEAR_SEC
-    const last = end - leads[leads.length - 1] + PHRASE_ARROW_CLEAR_SEC
-    result = result.filter((note) => note.time < first || note.time > last)
-    const lanes = ARROW_LANE_ORDERS[serie % ARROW_LANE_ORDERS.length]
-    serie += 1
-    leads.forEach((lead, index) => {
-      const lane = lanes[index % lanes.length]
-      arrows.push({ id: 0, time: end - lead, lane, kind: 'swipe', direction: arrowDirection(lane) })
-    })
+  const strengthOf = (note: LaneNote) => {
+    const frame = Math.round(note.time * analysis.fps)
+    let peak = 0
+    for (let i = Math.max(0, frame - 2); i <= Math.min(analysis.frameCount - 1, frame + 2); i++) {
+      peak = Math.max(peak, analysis.onsetStrength[i])
+    }
+    const reach = Math.round(ARROW_CONTRAST_SEC * analysis.fps)
+    let sum = 0
+    let count = 0
+    for (let i = Math.max(0, frame - reach); i <= Math.min(analysis.frameCount - 1, frame + reach); i++) {
+      sum += analysis.onsetStrength[i]
+      count += 1
+    }
+    return peak / Math.max(ARROW_CONTRAST_FLOOR, sum / Math.max(1, count))
   }
-  const merged = [...result, ...arrows]
-  merged.sort((a, b) => a.time - b.time)
-  return merged
+
+  // Где искать: у конца каждой фразы, а если фраз нет, в каждом отрезке песни
+  const ranges: { from: number; to: number }[] = []
+  if (phraseEnds.length > 0) {
+    for (const end of phraseEnds) ranges.push({ from: end - ARROW_SEARCH_SEC, to: end + ARROW_SEARCH_AFTER_SEC })
+  } else {
+    for (let start = FIRST_NOTE_SEC; start < analysis.duration; start += difficulty.arrowPeriodSec) {
+      ranges.push({ from: start, to: start + difficulty.arrowPeriodSec })
+    }
+  }
+  // Стрелки встают вокруг самого заметного удара в этом месте, а не по часам
+  const windows: { from: number; to: number }[] = []
+  for (const range of ranges) {
+    const inside = notes.filter((note) => note.kind === 'tap' && note.time >= range.from && note.time < range.to)
+    if (inside.length === 0) continue
+    const best = inside.reduce((a, b) => (strengthOf(b) > strengthOf(a) ? b : a))
+    windows.push({ from: best.time - ARROW_WINDOW_SEC / 2, to: best.time + ARROW_WINDOW_SEC / 2 })
+  }
+
+  const arrows = new Set<LaneNote>()
+  for (const window of windows) {
+    // На протяжке и в паузе стрелка неуместна, в остальном решает сила удара
+    const isFitting = (note: LaneNote) => !isNearSustain(note.time, sustains) && isAllowed(note.time, moments)
+    const candidates = notes.filter(
+      (note) => note.kind === 'tap' && note.time >= window.from && note.time < window.to && isFitting(note),
+    )
+    if (candidates.length === 0) continue
+    candidates.sort((a, b) => strengthOf(b) - strengthOf(a))
+    const strongest = strengthOf(candidates[0])
+
+    const chosen: LaneNote[] = []
+    for (const note of candidates) {
+      if (chosen.length >= difficulty.arrowRun || strengthOf(note) < strongest * ARROW_STRONG_SHARE) break
+      if (chosen.every((other) => Math.abs(other.time - note.time) >= ARROW_MIN_SPACING_SEC)) chosen.push(note)
+    }
+    for (const note of chosen) arrows.add(note)
+  }
+
+  const result: LaneNote[] = []
+  for (const note of notes) {
+    const isCrowding = !arrows.has(note) && [...arrows].some((arrow) => Math.abs(arrow.time - note.time) < ARROW_CLEAR_SEC)
+    if (isCrowding) continue
+    result.push(arrows.has(note) ? { ...note, kind: 'swipe', direction: arrowDirection(note.lane) } : note)
+  }
+  return result
 }
 
 /** Стрелка показывает туда, где стоит: слева влево, справа вправо, по центру вверх. */
@@ -345,117 +382,9 @@ function arrowDirection(lane: number): number {
   return lane - 1
 }
 
-/** Серия ровных чётких ударов, кандидат на стрелки. */
-interface ArrowSeries {
-  hits: LaneNote[]
-  score: number
-}
-
 /**
- * Стрелки ставятся на чёткие удары «пам-пам-пам»: несколько нот на равном
- * расстоянии, между которыми почти ничего не звучит. Никакого таймера: нет таких
- * ударов, нет и стрелок. Сначала берём самые выразительные серии.
- */
-function placeArrowSeries(
-  notes: LaneNote[],
-  difficulty: Difficulty,
-  analysis: AudioAnalysis,
-  sustains: Moment[],
-): LaneNote[] {
-  const candidates = findArrowSeries(notes, difficulty, analysis)
-  candidates.sort((a, b) => b.score - a.score)
-
-  const chosen: ArrowSeries[] = []
-  for (const series of candidates) {
-    const start = series.hits[0].time
-    if (isNearSustain(start, sustains)) continue
-    let isFree = true
-    for (const other of chosen) {
-      if (Math.abs(other.hits[0].time - start) < difficulty.arrowPeriodSec) isFree = false
-    }
-    if (isFree) chosen.push(series)
-  }
-  chosen.sort((a, b) => a.hits[0].time - b.hits[0].time)
-
-  const removed = new Set<LaneNote>()
-  for (const series of chosen) {
-    const first = series.hits[0].time - ARROW_CLEAR_SEC
-    const last = series.hits[series.hits.length - 1].time + ARROW_CLEAR_SEC
-    for (const note of notes) {
-      if (note.time >= first && note.time <= last && !series.hits.includes(note)) removed.add(note)
-    }
-    for (const hit of series.hits) {
-      hit.kind = 'swipe'
-      hit.direction = arrowDirection(hit.lane)
-    }
-  }
-  return notes.filter((note) => !removed.has(note))
-}
-
-/** Перебирает ноты и собирает все ровные серии с чёткими ударами. */
-function findArrowSeries(notes: LaneNote[], difficulty: Difficulty, analysis: AudioAnalysis): ArrowSeries[] {
-  const series: ArrowSeries[] = []
-  let i = 0
-  while (i + 1 < notes.length) {
-    const gap = notes[i + 1].time - notes[i].time
-    let end = i + 1
-    const isUsableGap = gap >= ARROW_MIN_GAP_SEC && gap <= ARROW_MAX_GAP_SEC
-    while (isUsableGap && end + 1 < notes.length) {
-      const nextGap = notes[end + 1].time - notes[end].time
-      if (Math.abs(nextGap - gap) > gap * ARROW_EVEN_SHARE) break
-      end += 1
-    }
-
-    const length = Math.min(end - i + 1, difficulty.arrowRun)
-    if (isUsableGap && end - i + 1 >= ARROW_MIN_HITS) {
-      const hits = notes.slice(i, i + length)
-      const clarity = seriesClarity(hits, analysis)
-      if (clarity >= ARROW_MIN_CLARITY) {
-        series.push({ hits, score: clarity * standOut(hits, analysis) })
-      }
-      // Длинный ровный ряд даёт несколько кандидатов: лучшие выберем по силе
-      i += length
-    } else {
-      i += 1
-    }
-  }
-  return series
-}
-
-/** Удар сильнее того, что звучит между ударами: 2 значит вдвое сильнее. */
-function seriesClarity(hits: LaneNote[], analysis: AudioAnalysis): number {
-  let hitPower = 0
-  let betweenPower = 0.01
-  for (let i = 0; i < hits.length; i++) {
-    const frame = Math.round(hits[i].time * analysis.fps)
-    hitPower += peakStrength(analysis, frame - 2, frame + 3) / hits.length
-    if (i + 1 < hits.length) {
-      const nextFrame = Math.round(hits[i + 1].time * analysis.fps)
-      betweenPower = Math.max(betweenPower, peakStrength(analysis, frame + 5, nextFrame - 4))
-    }
-  }
-  return hitPower / betweenPower
-}
-
-/** Насколько серия выделяется на фоне секунд перед ней. */
-function standOut(hits: LaneNote[], analysis: AudioAnalysis): number {
-  const start = Math.round(hits[0].time * analysis.fps)
-  const before = Math.max(0, start - Math.round(ARROW_LOOK_BACK_SEC * analysis.fps))
-  let sum = 0
-  for (let frame = before; frame < start; frame++) sum += analysis.onsetStrength[frame]
-  const mean = sum / Math.max(1, start - before)
-  return peakStrength(analysis, start - 2, start + 3) / Math.max(mean, 0.01)
-}
-
-function peakStrength(analysis: AudioAnalysis, from: number, to: number): number {
-  let peak = 0
-  const last = Math.min(to, analysis.frameCount)
-  for (let frame = Math.max(0, from); frame < last; frame++) peak = Math.max(peak, analysis.onsetStrength[frame])
-  return peak
-}
-
-/**
- * Обычная нота время от времени становится нотой с лучом. На сложной сложности
+ * Нота становится нотой с лучом, когда звук сам тянется: на доле он нарастает,
+ * а вне ритма держится долгая нота мелодии. На сложной сложности
  * остальные дорожки продолжают играть: держишь одну и нажимаешь другие.
  * Лесенку луч не перекрывает, иначе из неё выпадут ступени.
  */
@@ -470,14 +399,12 @@ function addHolds(
 ): LaneNote[] {
   const result: LaneNote[] = []
   const skipped = new Set<LaneNote>()
-  let notesSinceHold = 0
   let holdCount = 0
   let lastHoldEnd = 0
 
   for (let i = 0; i < notes.length; i++) {
     const note = notes[i]
     if (skipped.has(note)) continue
-    notesSinceHold += 1
     const frame = Math.round(note.time * analysis.fps)
     const isFree = note.kind === 'tap' && !isInRush(note.time, moments) && note.time >= lastHoldEnd
     let duration = 0
@@ -485,11 +412,12 @@ function addHolds(
       // В ритме луч ставит сам звук: на сильной доле он нарастает и тянется
       const step = beats.get(frame)
       if (step && soundSwells(analysis, frame)) duration = step * BEAT_HOLD_SHARE
-    } else if (isFree && notesSinceHold >= HOLD_EVERY && !isLadder(note)) {
-      // Луч по счётчику не заходит на ритм: там лучи ставит сам звук
+    } else if (isFree && !isLadder(note)) {
+      // Вне ритма луч ставит долгая нота мелодии: звук держится, а ударов поверх нет
+      const held = heldNoteSec(analysis, frame)
       const isBusy = (other: LaneNote) => isLadder(other) || rhythmic.has(Math.round(other.time * analysis.fps))
-      const possible = holdDuration(notes, i, moments, isBusy)
-      if (possible >= HOLD_MIN_SEC) duration = possible
+      const possible = Math.min(held, holdDuration(notes, i, moments, isBusy))
+      if (held >= MELODY_HOLD_MIN_SEC && possible >= HOLD_MIN_SEC) duration = possible
     }
     if (duration === 0) {
       result.push(note)
@@ -497,7 +425,6 @@ function addHolds(
     }
 
     holdCount += 1
-    notesSinceHold = 0
     lastHoldEnd = note.time + duration + BEAT_HOLD_REST_SEC
     const isDouble = difficulty.doubleHolds && holdCount % DOUBLE_HOLD_EVERY === 0
     const lanes = isDouble ? [note.lane, (note.lane + 1) % 3] : [note.lane]
@@ -564,6 +491,17 @@ function isLaneHeld(notes: LaneNote[], index: number, lane: number): boolean {
     if (isHold && notes[i].time + (notes[i].duration ?? 0) > time) return true
   }
   return false
+}
+
+/** Сколько секунд после ноты мелодия держит ту же высоту и не звучит новых ударов. */
+function heldNoteSec(analysis: AudioAnalysis, frame: number): number {
+  const { pitch } = analysis.melody
+  const start = Math.min(frame + PITCH_LOOK_AHEAD_FRAMES, pitch.length - 1)
+  const note = pitch[start]
+  if (note === 0) return 0
+  let end = start
+  while (end + 1 < pitch.length && pitch[end + 1] === note && analysis.onsets[end + 1] === 0) end += 1
+  return (end - frame) / analysis.fps
 }
 
 /** Звук после доли заметно растёт: так выглядит долгий аккорд, а не короткий удар. */
@@ -1102,16 +1040,37 @@ function addAccents(
   moments: Moment[],
   sections: Section[],
   sustains: Moment[],
+  analysis: AudioAnalysis,
+  intensity: Float32Array,
 ): LaneNote[] {
   const impacts = moments.filter((moment) => moment.kind === 'impact')
-  // Сначала длинные паузы: возвращение музыки слышно точнее, чем граница части
+  const meanOf = (values: Float32Array, from: number, to: number) => {
+    let sum = 0
+    let count = 0
+    for (let i = Math.max(0, Math.round(from * analysis.fps)); i < Math.min(values.length, Math.round(to * analysis.fps)); i++) {
+      sum += values[i]
+      count += 1
+    }
+    return count > 0 ? sum / count : 0
+  }
+
+  // Пробел только там, где песня правда меняется: настоящая тишина или резкий подъём.
+  // Короткие выпадения баса бывают каждые несколько секунд, на них пробел стал бы шаблоном
   const candidates: number[] = []
   for (const moment of moments) {
-    if (moment.kind === 'pause' && moment.end - moment.start >= LONG_PAUSE_SEC) {
-      candidates.push(nearestImpact(moment.end, impacts))
-    }
+    if (moment.kind !== 'pause' || moment.end - moment.start < SPACE_SILENCE_SEC) continue
+    const quiet = meanOf(analysis.rms, moment.start, moment.end)
+    const before = meanOf(analysis.rms, moment.start - SPACE_LOOK_SEC, moment.start)
+    if (quiet < before * SPACE_SILENCE_SHARE) candidates.push(nearestImpact(moment.end, impacts))
   }
-  for (let i = 1; i < sections.length; i++) candidates.push(nearestImpact(sections[i].start, impacts))
+  for (let i = 1; i < sections.length; i++) {
+    const start = sections[i].start
+    // Сила песни сглажена, поэтому сравниваем отрезки чуть в стороне от границы
+    const after = meanOf(intensity, start + SPACE_EDGE_SEC, start + SPACE_EDGE_SEC + SPACE_LOOK_SEC)
+    const before = meanOf(intensity, start - SPACE_EDGE_SEC - SPACE_LOOK_SEC, start - SPACE_EDGE_SEC)
+    const rise = after - before
+    if (rise >= SPACE_MIN_RISE) candidates.push(nearestImpact(start, impacts))
+  }
 
   const spaceTimes: number[] = []
   for (const time of candidates) {

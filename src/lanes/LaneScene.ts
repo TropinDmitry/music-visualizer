@@ -37,7 +37,8 @@ const PLATFORM_IDLE_LIGHT = 0.5
 const SPECIAL_COLOR = '#ffc933'
 const LANE_KEYS = ['A', 'S', 'D']
 /** Цвет дорожек на множителях ×1…×4: игра явно меняется, пока серия растёт. */
-const TIER_COLORS = ['#3dff9e', '#2ef2d0', '#9dffc4', '#d9fff0']
+/** Цвет дорожек по множителю: от зелёного к белому, на ×8 почти белый свет. */
+const TIER_COLORS = ['#3dff9e', '#2ef2d0', '#5fe8ff', '#8fd4ff', '#9dffc4', '#c4ffe0', '#d9fff0', '#f2fff9']
 
 /** Точка схода дорожек и линия нажатия, по вертикали экрана (-1 низ, 1 верх). */
 const VANISH_Y = 0.94

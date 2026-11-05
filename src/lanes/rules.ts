@@ -9,6 +9,8 @@ export const MISS_WARNING_STREAK = 3
 
 const GOOD_POINTS = 100
 const PERFECT_POINTS = 250
+/** Стрелка требует сменить жест, поэтому она дороже обычной ноты. */
+const ARROW_BONUS = 1.5
 const STAR_BONUS = 2
 /** Сколько звёзд нужно собрать для суперрежима. */
 export const STARS_FOR_OVERDRIVE = 3
@@ -21,7 +23,7 @@ const HOLD_DONE_POINTS = 200
 /** Отпустить можно чуть раньше конца луча: точность до кадра здесь не нужна. */
 const HOLD_RELEASE_GRACE_SEC = 0.15
 const ENERGY_LOSS_HOLD_BROKEN = 0.05
-const MAX_MULTIPLIER = 4
+const MAX_MULTIPLIER = 8
 const COMBO_PER_MULTIPLIER = 10
 const ENERGY_LOSS_MISS = 0.07
 const ENERGY_GAIN_HIT = 0.012
@@ -232,8 +234,8 @@ function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => bo
   const isPerfect = nearestError <= PERFECT_WINDOW_SEC
   const isSpecial = nearest.kind === 'star' || nearest.kind === 'accent' || nearest.kind === 'space'
   const overdriveBonus = isOverdrive(game, nearest.time) ? OVERDRIVE_BONUS : 1
-  const points =
-    (isPerfect ? PERFECT_POINTS : GOOD_POINTS) * multiplier(game) * (isSpecial ? STAR_BONUS : 1) * overdriveBonus
+  const bonus = isSpecial ? STAR_BONUS : nearest.kind === 'swipe' ? ARROW_BONUS : 1
+  const points = (isPerfect ? PERFECT_POINTS : GOOD_POINTS) * multiplier(game) * bonus * overdriveBonus
 
   let startedOverdrive = false
   if (nearest.kind === 'star') {
