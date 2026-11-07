@@ -30,6 +30,19 @@ export interface Palette {
   /** Фон без клипа: тёмный и светлый цвет облаков. */
   cloudLow: [number, number, number]
   cloudHigh: [number, number, number]
+  /** Яркость фона без клипа, не ниже этой. 0 — как настроил игрок. */
+  spaceLight: number
+  /** Яркие пятна поверх облаков: языки пламени, блики. Чёрный — без них. */
+  cloudAccent: [number, number, number]
+  /** Цвет летящих звёзд-лучей в фоне без клипа. */
+  streakColor: [number, number, number]
+  /** Цвет суперрежима и короны света над дорожками. */
+  overdrive: [number, number, number]
+  crown: [number, number, number]
+  /** Цвет звёзд-нот. */
+  special: string
+  /** Каждая какая обычная нота белая, как центр чашки. 0 — белых нет. */
+  whiteNoteEvery: number
   /** Можно ли плавно поворачивать оттенок клипа по ходу песни. Своей палитре это мешает. */
   allowsDrift: boolean
 }
@@ -49,6 +62,13 @@ export const PALETTES: Record<PaletteId, Palette> = {
     backgroundLight: 1,
     cloudLow: [0, 0.03, 0.05],
     cloudHigh: [0.03, 0.34, 0.26],
+    spaceLight: 0,
+    cloudAccent: [0, 0, 0],
+    streakColor: [0.7, 1, 0.9],
+    overdrive: [1, 0.78, 0.25],
+    crown: [0.62, 0.28, 1],
+    special: '#ffc933',
+    whiteNoteEvery: 0,
     allowsDrift: true,
   },
   fire: {
@@ -63,8 +83,15 @@ export const PALETTES: Record<PaletteId, Palette> = {
     tint: [1, 0.42, 0.25],
     tintAmount: 0.55,
     backgroundLight: 0.9,
-    cloudLow: [0.04, 0, 0],
-    cloudHigh: [0.42, 0.07, 0.02],
+    cloudLow: [0.09, 0.005, 0],
+    cloudHigh: [0.8, 0.17, 0.03],
+    spaceLight: 0.95,
+    cloudAccent: [1, 0.5, 0.08],
+    streakColor: [1, 0.65, 0.25],
+    overdrive: [1, 0.9, 0.45],
+    crown: [1, 0.3, 0.08],
+    special: '#ffc933',
+    whiteNoteEvery: 0,
     allowsDrift: false,
   },
   dark: {
@@ -81,6 +108,13 @@ export const PALETTES: Record<PaletteId, Palette> = {
     backgroundLight: 0.6,
     cloudLow: [0, 0, 0],
     cloudHigh: [0.06, 0.06, 0.08],
+    spaceLight: 0,
+    cloudAccent: [0, 0, 0],
+    streakColor: [0.55, 0.57, 0.62],
+    overdrive: [0.82, 0.85, 0.92],
+    crown: [0.4, 0.4, 0.5],
+    special: '#e8ecf2',
+    whiteNoteEvery: 3,
     allowsDrift: false,
   },
   pink: {
@@ -95,8 +129,15 @@ export const PALETTES: Record<PaletteId, Palette> = {
     tint: [1, 0.55, 0.85],
     tintAmount: 0.45,
     backgroundLight: 1,
-    cloudLow: [0.04, 0, 0.04],
-    cloudHigh: [0.36, 0.08, 0.3],
+    cloudLow: [0.09, 0.01, 0.08],
+    cloudHigh: [0.78, 0.22, 0.6],
+    spaceLight: 0.95,
+    cloudAccent: [0.62, 0.35, 1],
+    streakColor: [1, 0.8, 0.95],
+    overdrive: [1, 0.85, 0.95],
+    crown: [1, 0.4, 0.8],
+    special: '#ffc933',
+    whiteNoteEvery: 0,
     allowsDrift: false,
   },
 }

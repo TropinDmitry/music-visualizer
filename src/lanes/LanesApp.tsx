@@ -165,6 +165,10 @@ function sectionColor(sections: Section[], time: number, palette: Palette): stri
   return palette.normal
 }
 
+function cssColor([red, green, blue]: [number, number, number]): string {
+  return `rgb(${Math.round(red * 255)}, ${Math.round(green * 255)}, ${Math.round(blue * 255)})`
+}
+
 /** Палитра, которая сейчас в игре: выбранная игроком или угаданная по треку. */
 function resolvePalette(choice: PaletteChoice, guessed: PaletteId | null): Palette {
   if (choice !== 'auto') return PALETTES[choice]
@@ -726,6 +730,8 @@ export function LanesApp() {
             {
               '--tier': activePalette.tiers[hud.multiplier - 1],
               '--level': hud.multiplier,
+              '--overdrive': cssColor(activePalette.overdrive),
+              '--special': activePalette.special,
             } as CSSProperties
           }
         >

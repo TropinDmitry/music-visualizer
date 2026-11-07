@@ -21,6 +21,8 @@
 .hud {
   --tier: var(--green);
   --level: 1;
+  --overdrive: #ffc933;
+  --special: #ffc933;
 }
 
 /* Красная рамка по краям экрана: предупреждение без вспышки в центре */
@@ -437,25 +439,26 @@
 }
 
 .star-pips .is-earned {
-  color: #ffc933;
-  text-shadow: 0 0 8px rgba(255, 201, 51, 0.8);
+  color: var(--special);
+  text-shadow: 0 0 8px var(--special);
 }
 
+/* Цвет суперрежима задаёт палитра: в Тьме он серебряный, а не золотой */
 .is-overdrive .side-pill {
-  border-color: #ffc933;
+  border-color: var(--overdrive);
 }
 
 .is-overdrive .score-value {
-  color: #ffd86b;
-  text-shadow: 0 0 26px rgba(255, 201, 51, 0.85);
+  color: var(--overdrive);
+  text-shadow: 0 0 26px var(--overdrive);
 }
 
 .is-overdrive .streak-meter strong {
-  color: #ffd86b;
+  color: var(--overdrive);
 }
 
 .is-overdrive .streak-bar div {
-  background: #ffc933;
+  background: var(--overdrive);
 }
 
 .focus-hint {
