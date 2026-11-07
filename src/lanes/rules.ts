@@ -31,13 +31,7 @@ const ENERGY_GAIN_HIT = 0.012
 const COMBO_MILESTONES = [10, 25, 50, 75, 100, 150, 200, 300, 500]
 
 /** Уровни серии: чем дольше без промаха, тем сильнее меняется экран. */
-export const STREAK_TIERS = [
-  { from: 0, name: '' },
-  { from: 10, name: 'Разогрев' },
-  { from: 25, name: 'В ударе' },
-  { from: 50, name: 'В потоке' },
-  { from: 100, name: 'Легенда' },
-]
+export const STREAK_TIERS = [{ from: 0 }, { from: 10 }, { from: 25 }, { from: 50 }, { from: 100 }]
 
 export type LaneEventType = 'perfect' | 'good' | 'miss' | 'holdDone' | 'holdBroken'
 

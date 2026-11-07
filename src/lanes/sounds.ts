@@ -109,6 +109,55 @@ export class SoundEffects {
     this.pluck(now + 0.18, 164.8, 0.4, 0.16)
   }
 
+  /**
+   * Звезда в итогах: каждая следующая выше и громче, так растёт ощущение награды.
+   * Последняя звезда за партию без промахов звенит колокольчиком и аккордом сверху.
+   */
+  resultStar(index: number, isBright: boolean): void {
+    const now = this.context.currentTime
+    const notes = [523.3, 659.3, 784]
+    this.pluck(now, notes[index], 0.6, 0.1 + index * 0.05)
+    this.pluck(now, notes[index] / 2, 0.5, 0.06 + index * 0.03)
+    if (!isBright) return
+    this.bell(now + 0.06, 1046.5, 1.8, 0.16)
+    this.bell(now + 0.12, 1318.5, 1.6, 0.1)
+    this.bell(now + 0.18, 1568, 1.4, 0.08)
+  }
+
+  /** Хлопок салюта: короткий шорох с потрескиванием. */
+  firework(): void {
+    const now = this.context.currentTime
+    const source = this.context.createBufferSource()
+    source.buffer = this.noise
+    source.playbackRate.value = 0.6 + Math.random() * 0.5
+
+    const filter = this.context.createBiquadFilter()
+    filter.type = 'bandpass'
+    filter.frequency.value = 900 + Math.random() * 900
+    filter.Q.value = 0.7
+
+    const gain = this.context.createGain()
+    gain.gain.setValueAtTime(0.0001, now)
+    gain.gain.exponentialRampToValueAtTime(0.5, now + 0.01)
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.45)
+
+    source.connect(filter)
+    filter.connect(gain)
+    gain.connect(this.output)
+    source.start(now, Math.random() * 0.4)
+    source.stop(now + 0.5)
+  }
+
+  /** Колокольчик: синус и два негармоничных обертона, звенят дольше щипка. */
+  private bell(startAt: number, frequency: number, seconds: number, volume: number): void {
+    const partials = [
+      [1, 1],
+      [2.76, 0.35],
+      [5.4, 0.12],
+    ]
+    for (const [ratio, share] of partials) this.pluck(startAt, frequency * ratio, seconds / ratio ** 0.5, volume * share)
+  }
+
   /** Щипок струны: мягкий вход и плавное затухание, чистый синус без обертонов. */
   private pluck(startAt: number, frequency: number, seconds: number, volume: number): void {
     const oscillator = this.context.createOscillator()

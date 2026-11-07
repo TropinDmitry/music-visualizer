@@ -46,7 +46,7 @@
   flex-direction: column;
   align-items: center;
   padding-top: 8px;
-  background: linear-gradient(rgba(2, 16, 14, 0.85), rgba(2, 16, 14, 0));
+  background: linear-gradient(rgba(8, 4, 26, 0.85), rgba(8, 4, 26, 0));
 }
 
 .score-value {
@@ -88,7 +88,7 @@
   flex-direction: column;
   gap: 3px;
   padding: 8px 12px;
-  background: rgba(2, 18, 15, 0.8);
+  background: rgba(10, 6, 30, 0.8);
   border: 2px solid var(--tier);
   transition: border-color 0.2s;
 }
@@ -253,7 +253,7 @@
   color: var(--tier);
   text-shadow:
     0 0 18px rgba(0, 0, 0, 0.9),
-    0 2px 0 #012018;
+    0 2px 0 #12052e;
 }
 
 .banner span {
@@ -330,11 +330,6 @@
   color: rgba(255, 255, 255, 0.16);
 }
 
-.stars .is-earned {
-  color: #ffd23f;
-  text-shadow: 0 0 22px rgba(255, 210, 63, 0.6);
-  animation: combo-pop 0.5s ease-out;
-}
 
 .new-best {
   font-size: 20px;
@@ -477,12 +472,6 @@
   opacity: 0.7;
 }
 
-/* Название длиннее, чем было: так оно помещается в одну строку на компьютере */
-.menu header h1 {
-  font-size: clamp(32px, 6vw, 60px);
-  letter-spacing: 0.16em;
-  margin-right: -0.16em;
-}
 
 /* Выбор палитры: пять кнопок в одну строку, у каждой полоска своего цвета */
 .palette-list button {
@@ -498,4 +487,379 @@
   width: 22px;
   height: 4px;
   border-radius: 2px;
+}
+
+/* --- Неоновая гамма интерфейса: бирюзовый, фиолетовый и розовый вместо одного зелёного --- */
+
+:root {
+  --space: #07041a;
+  --glass: rgba(14, 8, 38, 0.74);
+  --line: rgba(162, 89, 255, 0.34);
+  /* --green осталось именем главного акцента из общего game.css, теперь он бирюзовый */
+  --green: #2ef2ff;
+  --mint: #6ff7e4;
+  --violet: #a259ff;
+  --magenta: #ff4fd8;
+  --text: #f0eeff;
+  --muted: #a9a4d8;
+  --neon: linear-gradient(90deg, #2ef2ff, #a259ff 55%, #ff4fd8);
+}
+
+.menu-card {
+  box-shadow:
+    inset 0 1px 0 rgba(46, 242, 255, 0.12),
+    0 0 28px rgba(162, 89, 255, 0.12);
+}
+
+.menu-card h2 {
+  color: #c79bff;
+}
+
+.file-button {
+  border-color: var(--green);
+  box-shadow: 0 0 12px rgba(46, 242, 255, 0.18);
+}
+
+.file-button:hover {
+  background: rgba(46, 242, 255, 0.1);
+}
+
+.file-button.is-secondary:hover {
+  background: rgba(162, 89, 255, 0.12);
+}
+
+.segmented .is-active {
+  background: var(--neon);
+  color: #12052e;
+}
+
+input[type='range'],
+input[type='checkbox'] {
+  accent-color: var(--violet);
+}
+
+.start-button {
+  background: var(--neon);
+  color: #12052e;
+  box-shadow: 0 0 24px rgba(162, 89, 255, 0.45);
+  transition:
+    filter 0.2s,
+    box-shadow 0.2s;
+}
+
+.start-button:hover:not(:disabled) {
+  background: var(--neon);
+  filter: brightness(1.15);
+  box-shadow: 0 0 34px rgba(255, 79, 216, 0.55);
+}
+
+.overlay {
+  background: rgba(8, 4, 26, 0.78);
+}
+
+.overlay h2 {
+  font-size: clamp(26px, 4vw, 38px);
+  background: var(--neon);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+}
+
+/* --- Логотип и название --- */
+
+.logo {
+  display: block;
+  overflow: visible;
+}
+
+.wordmark {
+  font-size: clamp(30px, 6vw, 58px);
+  font-weight: 900;
+  letter-spacing: 0.16em;
+  margin-right: -0.16em;
+  background: var(--neon);
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  text-shadow: none;
+  filter: drop-shadow(0 0 14px rgba(162, 89, 255, 0.55));
+}
+
+.menu-logo {
+  width: 92px;
+  margin: 0 auto 4px;
+}
+
+/* --- Заставка: логотип рисуется, потом приглашение нажать --- */
+
+.splash {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 16px;
+  text-align: center;
+  cursor: pointer;
+  background: radial-gradient(ellipse at center, rgba(8, 4, 26, 0.35), rgba(8, 4, 26, 0.85));
+}
+
+.splash-logo {
+  width: min(220px, 48vw);
+}
+
+.splash .wordmark {
+  font-size: clamp(30px, 8vw, 72px);
+  animation: wordmark-in 0.9s ease-out 0.7s both;
+}
+
+.splash-logo .logo-lane {
+  stroke-dasharray: 100;
+  animation: lane-draw 0.9s ease-out both;
+}
+
+.splash-logo .logo-lane:nth-child(2) {
+  animation-delay: 0.12s;
+}
+
+.splash-logo .logo-lane:nth-child(3) {
+  animation-delay: 0.24s;
+}
+
+.splash-logo .logo-note {
+  animation: note-in 0.5s ease-out both;
+}
+
+.splash-logo .logo-note:nth-child(1) {
+  animation-delay: 0.6s;
+}
+
+.splash-logo .logo-note:nth-child(2) {
+  animation-delay: 0.75s;
+}
+
+.splash-logo .logo-note:nth-child(3) {
+  animation-delay: 0.9s;
+}
+
+.splash-logo .logo-ring {
+  transform-origin: 60px 86px;
+  animation:
+    note-in 0.5s ease-out 1s both,
+    ring-pulse 1.6s ease-in-out 1.5s infinite;
+}
+
+@keyframes lane-draw {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes note-in {
+  from {
+    opacity: 0;
+    transform: scale(0.3);
+  }
+}
+
+@keyframes ring-pulse {
+  50% {
+    transform: scale(1.12);
+    opacity: 0.7;
+  }
+}
+
+@keyframes wordmark-in {
+  from {
+    opacity: 0;
+    letter-spacing: 0.4em;
+  }
+}
+
+.splash-hint {
+  min-height: 1.4em;
+  font-size: 15px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.splash-hint.is-ready {
+  color: var(--text);
+  animation: hint-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes hint-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* --- Язык и музыка в правом верхнем углу --- */
+
+.corner-controls {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.lang-switch {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  overflow: hidden;
+  background: var(--glass);
+}
+
+.lang-switch button {
+  padding: 6px 10px;
+  border: none;
+  background: none;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.lang-switch .is-active {
+  background: var(--neon);
+  color: #12052e;
+}
+
+.music-toggle {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--glass);
+  color: var(--green);
+  cursor: pointer;
+}
+
+.music-toggle svg {
+  width: 20px;
+  height: 20px;
+}
+
+.music-toggle.is-muted {
+  color: var(--muted);
+}
+
+/* Меню не залезает под кнопки в углу */
+.menu {
+  padding-top: 56px;
+}
+
+/* --- Звёзды итогов: по одной, последняя за идеальную партию звенит ярче --- */
+
+.result-stars {
+  position: relative;
+}
+
+.stars span {
+  opacity: 0;
+  transform: scale(0.3);
+}
+
+.stars .is-shown {
+  opacity: 1;
+  transform: none;
+  transition:
+    opacity 0.25s,
+    transform 0.25s;
+}
+
+.stars .is-earned {
+  color: #ffd23f;
+  text-shadow: 0 0 22px rgba(255, 210, 63, 0.6);
+  animation: star-land 0.5s cubic-bezier(0.2, 1.8, 0.4, 1);
+}
+
+.stars .is-flawless {
+  color: #fff6c9;
+  text-shadow:
+    0 0 18px #ffffff,
+    0 0 40px #ffd23f,
+    0 0 70px #ff4fd8;
+  animation:
+    star-land 0.6s cubic-bezier(0.2, 2, 0.4, 1),
+    star-shine 1.4s ease-in-out 0.6s infinite;
+}
+
+@keyframes star-land {
+  from {
+    transform: scale(2.2) rotate(-25deg);
+    opacity: 0;
+  }
+}
+
+@keyframes star-shine {
+  50% {
+    text-shadow:
+      0 0 26px #ffffff,
+      0 0 60px #ffd23f,
+      0 0 100px #ff4fd8;
+  }
+}
+
+/* Салют: искры разлетаются по кругу и гаснут, у каждого хлопка свой оттенок */
+.fireworks {
+  position: absolute;
+  left: 50%;
+  top: -120px;
+  width: min(640px, 100vw);
+  height: 300px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.firework {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.firework i {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  margin: -3px;
+  border-radius: 50%;
+  background: hsl(var(--hue) 100% 70%);
+  box-shadow: 0 0 8px hsl(var(--hue) 100% 60%);
+  animation: firework-spark 1.4s cubic-bezier(0.1, 0.7, 0.3, 1) forwards;
+}
+
+@keyframes firework-spark {
+  from {
+    transform: rotate(var(--angle)) translateX(0);
+    opacity: 1;
+  }
+  70% {
+    opacity: 1;
+  }
+  to {
+    transform: rotate(var(--angle)) translateX(var(--distance)) translateY(14px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .firework {
+    display: none;
+  }
 }

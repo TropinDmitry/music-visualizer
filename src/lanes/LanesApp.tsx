@@ -13,6 +13,10 @@ import {
   type DifficultyId,
 } from './level.ts'
 import { guessPalette, PALETTE_CHOICES, PALETTES, type Palette, type PaletteChoice, type PaletteId } from './palettes.ts'
+import { detectLang, saveLang, TEXTS, type Lang } from './i18n.ts'
+import { Logo } from './Logo.tsx'
+import { MenuMusic } from './menuMusic.ts'
+import { ResultStars } from './ResultStars.tsx'
 import { SoundEffects } from './sounds.ts'
 import { findMoments, findSections, songIntensity, type Moment, type Section } from './structure.ts'
 import {
@@ -38,7 +42,7 @@ import {
   type LaneGame,
 } from './rules.ts'
 
-type Screen = 'menu' | 'playing' | 'paused' | 'results'
+type Screen = 'splash' | 'menu' | 'playing' | 'paused' | 'results'
 
 interface Settings {
   difficulty: DifficultyId
@@ -139,16 +143,14 @@ const MAX_POPUPS = 6
 /** Расстояние между дорожками на линии нажатия, в долях высоты экрана. */
 const POPUP_LANE_STEP_VH = 31
 
-const PRAISE: Record<number, string> = {
-  10: 'РАЗОГРЕВ',
-  25: 'В УДАРЕ',
-  50: 'В ПОТОКЕ',
-  75: 'НЕ ОСТАНАВЛИВАЙТЕСЬ',
-  100: 'ЛЕГЕНДА',
-  150: 'БЕЗ ЕДИНОЙ ОШИБКИ?',
-  200: 'ВЫ МАШИНА',
-  300: 'ЗА ГРАНЬЮ',
-  500: 'АБСОЛЮТ',
+const MUSIC_KEY = 'tyt-music-muted'
+
+function loadMusicMuted(): boolean {
+  try {
+    return localStorage.getItem(MUSIC_KEY) === '1'
+  } catch {
+    return false
+  }
 }
 
 function sectionColor(sections: Section[], time: number, palette: Palette): string {
@@ -191,18 +193,24 @@ function saveBestScore(key: string, score: number): void {
   }
 }
 
-function popupText(event: LaneEvent): string {
-  if (event.type === 'miss') return 'мимо'
-  if (event.type === 'holdBroken') return 'луч оборван'
+function popupText(event: LaneEvent, lang: Lang): string {
+  if (event.type === 'miss') return TEXTS[lang].miss
+  if (event.type === 'holdBroken') return TEXTS[lang].holdBroken
   if (event.kind === 'space') return `SPACE! +${event.points}`
   return `${event.kind === 'star' ? '★ ' : ''}+${event.points}`
 }
 
-function resultTitle(result: GameResult): string {
-  if (result.failed) return 'Энергия закончилась'
-  if (result.misses === 0) return 'Без единого промаха!'
-  if (result.rank === 'S' || result.rank === 'A') return 'Отличная партия'
-  return 'Трек пройден'
+function resultTitle(result: GameResult, lang: Lang): string {
+  const text = TEXTS[lang]
+  if (result.failed) return text.failed
+  if (result.misses === 0) return text.fullCombo
+  if (result.rank === 'S' || result.rank === 'A') return text.great
+  return text.cleared
+}
+
+/** Партия без единого промаха и на все три звезды: за неё звенит последняя звезда и салют. */
+function isFlawless(result: GameResult): boolean {
+  return !result.failed && result.misses === 0 && result.stars === 3
 }
 
 export function LanesApp() {
@@ -214,6 +222,7 @@ export function LanesApp() {
   const pressedLanesRef = useRef([false, false, false])
   const nextIdRef = useRef(1)
   const soundsRef = useRef<SoundEffects | null>(null)
+  const musicRef = useRef<MenuMusic | null>(null)
   const lastMultiplierRef = useRef(1)
   /** Активные касания: на телефоне пальцев может быть несколько сразу. */
   const touchesRef = useRef(new Map<number, ActiveTouch>())
@@ -222,7 +231,11 @@ export function LanesApp() {
   const playedImpactsRef = useRef(new Set<Moment>())
   const eventHandlerRef = useRef<(event: LaneEvent | null) => void>(() => {})
 
-  const [screen, setScreen] = useState<Screen>('menu')
+  const [screen, setScreen] = useState<Screen>('splash')
+  const [lang, setLang] = useState<Lang>(detectLang)
+  const [isMusicMuted, setMusicMuted] = useState(loadMusicMuted)
+  const [isSplashReady, setSplashReady] = useState(false)
+  const text = TEXTS[lang]
   const [analysis, setAnalysis] = useState<AudioAnalysis | null>(null)
   const [trackName, setTrackName] = useState('')
   const [clipName, setClipName] = useState('')
@@ -256,15 +269,34 @@ export function LanesApp() {
   const activePalette = resolvePalette(settings.palette, guessedPalette)
 
   // Цикл анимации живёт вне React и читает свежие значения через ref
-  const liveRef = useRef({ screen, analysis, settings })
+  const liveRef = useRef({ screen, analysis, settings, lang })
   useEffect(() => {
-    liveRef.current = { screen, analysis, settings }
+    liveRef.current = { screen, analysis, settings, lang }
   })
+
+  useEffect(() => {
+    document.documentElement.lang = lang
+  }, [lang])
+
+  // Логотип успевает нарисоваться, и только потом появляется приглашение нажать
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSplashReady(true), 1400)
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  // Музыка звучит только в меню: в игре своя песня, а в итогах звенят звёзды
+  useEffect(() => {
+    const music = musicRef.current
+    if (!music) return
+    if (screen === 'menu' && !isMusicMuted) music.start()
+    else music.stop()
+  }, [screen, isMusicMuted])
 
   const getPlayer = (): AudioPlayer => {
     if (!playerRef.current) {
       playerRef.current = new AudioPlayer(new AudioContext())
       soundsRef.current = new SoundEffects(playerRef.current.context)
+      musicRef.current = new MenuMusic(playerRef.current.context)
     }
     return playerRef.current
   }
@@ -348,16 +380,17 @@ export function LanesApp() {
         }
       }
 
+      const words = TEXTS[liveRef.current.lang]
       if (event.milestone) {
-        showBanner(PRAISE[event.milestone], `${event.milestone} подряд`, false)
+        showBanner(words.comboBanner(event.milestone), '', false)
         sounds?.milestone()
       }
       if (event.startedOverdrive) {
-        showBanner('СУПЕРРЕЖИМ', 'очки ×2 на 8 секунд', false)
+        showBanner(words.fever, words.feverDetail, false)
         sounds?.milestone()
       }
       if (event.warning) {
-        showBanner('СОБЕРИТЕСЬ!', `${MISS_WARNING_STREAK} промаха подряд`, true)
+        showBanner(words.warning, words.warningDetail(MISS_WARNING_STREAK), true)
         sounds?.warning()
       }
 
@@ -377,7 +410,7 @@ export function LanesApp() {
         id: nextIdRef.current,
         lane: event.lane,
         type: event.type,
-        text: popupText(event),
+        text: popupText(event, liveRef.current.lang),
       }
       setPopups((previous) => [...previous, popup].slice(-MAX_POPUPS))
     }
@@ -456,11 +489,13 @@ export function LanesApp() {
           })
         }
         if (game.failed || !player.isPlaying) finishRef.current()
-      } else if (currentScreen === 'menu') {
+      } else if (currentScreen === 'menu' || currentScreen === 'splash') {
+        // Фон меню качается в такт его музыке, а без музыки просто дышит
+        const pulse = musicRef.current?.pulse() ?? 0
         features.time = time
         features.energy = time * 0.3
-        features.bass = 0.3 + 0.15 * Math.sin(clockTime * 1.5)
-        features.beatPulse = 0
+        features.bass = 0.3 + 0.15 * Math.sin(clockTime * 1.5) + pulse * 0.35
+        features.beatPulse = pulse
         scene.setHueShift(0)
       }
 
@@ -472,7 +507,7 @@ export function LanesApp() {
         scene.setStreak(0, false)
       }
       scene.setClipOptions(current.look, current.clipBrightness, current.laneContrast, current.clipFocus)
-      const inMenu = currentScreen === 'menu'
+      const inMenu = currentScreen === 'menu' || currentScreen === 'splash'
       scene.render(
         features,
         videoRef.current,
@@ -665,9 +700,9 @@ export function LanesApp() {
     getPlayer().load(buffer)
     setAnalysis(null)
     setTrackName(name)
-    setStatus('Строим уровень…')
+    setStatus(text.building)
     const analysisResult = await runAnalysisInWorker(audioBufferToMono(buffer), buffer.sampleRate, (fraction) =>
-      setStatus(`Строим уровень… ${Math.round(fraction * 100)}%`),
+      setStatus(`${text.building} ${Math.round(fraction * 100)}%`),
     )
     momentsRef.current = findMoments(analysisResult)
     sectionsRef.current = findSections(analysisResult, songIntensity(analysisResult))
@@ -676,7 +711,7 @@ export function LanesApp() {
   }
 
   const handleTrackFile = async (file: File) => {
-    setStatus('Читаем файл…')
+    setStatus(text.reading)
     try {
       const buffer = await decodeAudioFile(file, getPlayer().context)
       clearClip()
@@ -684,7 +719,7 @@ export function LanesApp() {
       if (file.type.startsWith('video/')) attachClip(file) // клип сразу и звук, и картинка
     } catch (error) {
       console.error(error)
-      setStatus('Не удалось прочитать звук из файла. Попробуйте mp3, wav, ogg или mp4.')
+      setStatus(text.readError)
     }
   }
 
@@ -706,6 +741,59 @@ export function LanesApp() {
   }
 
   const update = (patch: Partial<Settings>) => setSettings({ ...settings, ...patch })
+
+  /** Первое касание: браузер разрешает звук только после него, поэтому музыка стартует здесь. */
+  const leaveSplash = () => {
+    if (!isSplashReady) return
+    const player = getPlayer()
+    void player.context.resume()
+    if (!isMusicMuted) musicRef.current?.start()
+    setScreen('menu')
+  }
+
+  const switchLang = (next: Lang) => {
+    setLang(next)
+    saveLang(next)
+  }
+
+  const toggleMusic = () => {
+    const next = !isMusicMuted
+    setMusicMuted(next)
+    try {
+      localStorage.setItem(MUSIC_KEY, next ? '1' : '0')
+    } catch {
+      // выбор просто не запомнится
+    }
+  }
+
+  const corner = (
+    <div className="corner-controls" onPointerDown={(event) => event.stopPropagation()}>
+      <div className="lang-switch" role="group" aria-label="Language">
+        {(['ru', 'en'] as const).map((code) => (
+          <button key={code} className={code === lang ? 'is-active' : ''} onClick={() => switchLang(code)}>
+            {code.toUpperCase()}
+          </button>
+        ))}
+      </div>
+      {screen === 'menu' && (
+        <button
+          className={`music-toggle ${isMusicMuted ? 'is-muted' : ''}`}
+          onClick={toggleMusic}
+          aria-label={isMusicMuted ? text.musicOff : text.musicOn}
+          title={isMusicMuted ? text.musicOff : text.musicOn}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 9h4l5-4v14l-5-4H4z" fill="currentColor" />
+            {isMusicMuted ? (
+              <path d="M16 9l5 6M21 9l-5 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            ) : (
+              <path d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" />
+            )}
+          </svg>
+        </button>
+      )}
+    </div>
+  )
   const duration = analysis?.duration ?? 0
   const trackProgress = duration > 0 ? Math.min(1, hud.time / duration) : 0
 
@@ -736,7 +824,7 @@ export function LanesApp() {
           }
         >
           <div className="score-bar">
-            <strong className="score-value">{hud.score.toLocaleString('ru-RU')}</strong>
+            <strong className="score-value">{hud.score.toLocaleString(text.locale)}</strong>
             <div className="track-progress">
               <div style={{ width: `${trackProgress * 100}%` }} />
             </div>
@@ -745,7 +833,7 @@ export function LanesApp() {
             </span>
             {hud.streakTier > 0 && (
               <div className="streak-meter" key={hud.streakTier}>
-                <strong>{STREAK_TIERS[hud.streakTier].name}</strong>
+                <strong>{text.streak(STREAK_TIERS[hud.streakTier].from)}</strong>
                 <div className="streak-bar">
                   <div style={{ width: `${hud.streakFill * 100}%` }} />
                 </div>
@@ -764,12 +852,12 @@ export function LanesApp() {
               ×{hud.multiplier}
             </strong>
             <span className="pill-note" key={`combo-${hud.combo}`}>
-              {hud.combo} подряд
+              {hud.combo} {text.combo}
             </span>
             <div className="multiplier-bar">
               <div style={{ width: `${hud.multiplierFill * 100}%` }} />
             </div>
-            <div className="star-pips" aria-label={`Звёзд до суперрежима: ${hud.starCharge} из ${STARS_FOR_OVERDRIVE}`}>
+            <div className="star-pips" aria-label={text.starsToFever(hud.starCharge, STARS_FOR_OVERDRIVE)}>
               {Array.from({ length: STARS_FOR_OVERDRIVE }, (_, index) => (
                 <span key={index} className={index < hud.starCharge ? 'is-earned' : ''}>
                   ★
@@ -780,7 +868,7 @@ export function LanesApp() {
 
           <div className="side-pill side-right">
             <strong className="pill-main">{hud.accuracyPercent}%</strong>
-            <span className="pill-note">энергия</span>
+            <span className="pill-note">{text.energy}</span>
             <div className="multiplier-bar energy-bar">
               <div style={{ width: `${hud.energy * 100}%` }} />
             </div>
@@ -804,19 +892,30 @@ export function LanesApp() {
             </span>
           ))}
 
-          <div className="hud-hint">A S D — круги · ← ↑ → — стрелки · пробел — SPACE · Esc — пауза</div>
+          <div className="hud-hint">{text.hint}</div>
+        </div>
+      )}
+
+      {(screen === 'splash' || screen === 'menu') && corner}
+
+      {screen === 'splash' && (
+        <div className="splash" onClick={leaveSplash} data-testid="splash">
+          <Logo className="splash-logo" />
+          <h1 className="wordmark">TAP YOUR TRACK</h1>
+          <p className={`splash-hint ${isSplashReady ? 'is-ready' : ''}`}>{isSplashReady ? text.tapToStart : text.loading}</p>
         </div>
       )}
 
       {screen === 'menu' && (
         <main className="menu">
           <header>
-            <h1>TAP YOUR TRACK</h1>
-            <p>Три дорожки, ваша музыка и ваш клип, переработанный на весь экран.</p>
+            <Logo className="menu-logo" />
+            <h1 className="wordmark">TAP YOUR TRACK</h1>
+            <p>{text.tagline}</p>
           </header>
 
           <section className="menu-card">
-            <h2>Трек и клип</h2>
+            <h2>{text.trackAndClip}</h2>
             <label className="file-button">
               <input
                 type="file"
@@ -828,7 +927,7 @@ export function LanesApp() {
                   event.target.value = ''
                 }}
               />
-              Загрузить песню или клип целиком
+              {text.loadTrack}
             </label>
             <label className="file-button is-secondary">
               <input
@@ -841,25 +940,25 @@ export function LanesApp() {
                   event.target.value = ''
                 }}
               />
-              Добавить отдельный видеофон
+              {text.addClip}
             </label>
             <button
               className="text-button"
               onClick={() => {
                 clearClip()
-                void loadBuffer(createDemoBuffer(getPlayer().context), 'Демо-трек')
+                void loadBuffer(createDemoBuffer(getPlayer().context), text.demoName)
               }}
             >
-              Или взять демо-трек
+              {text.demoTrack}
             </button>
             <p className="track-name" data-testid="track-status">
-              {status || trackName || 'Файлы остаются у вас: на сервер ничего не загружается.'}
-              {clipName && !status ? ` · клип: ${clipName}` : ''}
+              {status || trackName || text.privacy}
+              {clipName && !status ? ` · ${text.clip}: ${clipName}` : ''}
             </p>
           </section>
 
           <section className="menu-card">
-            <h2>Настройки</h2>
+            <h2>{text.settings}</h2>
             <div className="segmented">
               {DIFFICULTIES.map((difficulty) => (
                 <button
@@ -867,11 +966,11 @@ export function LanesApp() {
                   className={difficulty.id === settings.difficulty ? 'is-active' : ''}
                   onClick={() => update({ difficulty: difficulty.id })}
                 >
-                  {difficulty.label}
+                  {text.difficulties[difficulty.id]}
                 </button>
               ))}
             </div>
-            <div className="segmented palette-list" aria-label="Палитра">
+            <div className="segmented palette-list" aria-label={text.paletteLabel}>
               {PALETTE_CHOICES.map((choice) => (
                 <button
                   key={choice.id}
@@ -879,16 +978,16 @@ export function LanesApp() {
                   onClick={() => update({ palette: choice.id })}
                 >
                   {choice.id !== 'auto' && <i className="swatch" style={{ background: PALETTES[choice.id].normal }} />}
-                  {choice.label}
+                  {text.palettes[choice.id]}
                 </button>
               ))}
             </div>
             <p className="focus-hint">
               {settings.palette === 'auto'
                 ? guessedPalette
-                  ? `Игра выбрала по звуку: ${PALETTES[guessedPalette].label}`
-                  : 'Палитра подберётся по звуку трека'
-                : 'Палитра выбрана вручную'}
+                  ? text.paletteGuessed(text.palettes[guessedPalette])
+                  : text.paletteWaiting
+                : text.paletteManual}
             </p>
             <div className="segmented look-list">
               {CLIP_LOOKS.map((look) => (
@@ -897,13 +996,13 @@ export function LanesApp() {
                   className={look.id === settings.look ? 'is-active' : ''}
                   onClick={() => update({ look: look.id })}
                 >
-                  {look.label}
+                  {text.looks[look.id]}
                 </button>
               ))}
             </div>
             <label className="slider">
               <span>
-                Яркость клипа <output>{Math.round(settings.clipBrightness * 100)}%</output>
+                {text.clipBrightness} <output>{Math.round(settings.clipBrightness * 100)}%</output>
               </span>
               <input
                 type="range"
@@ -916,7 +1015,7 @@ export function LanesApp() {
             </label>
             <label className="slider">
               <span>
-                Приглушить клип за дорожками <output>{Math.round(settings.clipFocus * 100)}%</output>
+                {text.clipFocus} <output>{Math.round(settings.clipFocus * 100)}%</output>
               </span>
               <input
                 type="range"
@@ -929,7 +1028,7 @@ export function LanesApp() {
             </label>
             <label className="slider">
               <span>
-                Контраст дорожек <output>{Math.round(settings.laneContrast * 100)}%</output>
+                {text.laneContrast} <output>{Math.round(settings.laneContrast * 100)}%</output>
               </span>
               <input
                 type="range"
@@ -942,7 +1041,7 @@ export function LanesApp() {
             </label>
             <label className="slider">
               <span>
-                Скорость нот <output>{settings.approachSec.toFixed(1)} с</output>
+                {text.noteSpeed} <output>{settings.approachSec.toFixed(1)} {text.seconds}</output>
               </span>
               <input
                 type="range"
@@ -955,7 +1054,7 @@ export function LanesApp() {
             </label>
             <label className="slider">
               <span>
-                Громкость <output>{Math.round(settings.volume * 100)}%</output>
+                {text.volume} <output>{Math.round(settings.volume * 100)}%</output>
               </span>
               <input
                 type="range"
@@ -968,7 +1067,7 @@ export function LanesApp() {
             </label>
             <label className="slider">
               <span>
-                Звуковые эффекты <output>{Math.round(settings.effectsVolume * 100)}%</output>
+                {text.effects} <output>{Math.round(settings.effectsVolume * 100)}%</output>
               </span>
               <input
                 type="range"
@@ -981,7 +1080,7 @@ export function LanesApp() {
             </label>
             <label className="slider">
               <span>
-                Поправка на задержку <output>{settings.offsetMs} мс</output>
+                {text.offset} <output>{settings.offsetMs} {text.ms}</output>
               </span>
               <input
                 type="range"
@@ -999,7 +1098,7 @@ export function LanesApp() {
                 checked={settings.colorDrift}
                 onChange={(event) => update({ colorDrift: event.target.checked })}
               />
-              Цвет клипа меняется по ходу песни
+              {text.colorDrift}
             </label>
             <label className="toggle">
               <input
@@ -1008,82 +1107,80 @@ export function LanesApp() {
                 checked={settings.autopilot}
                 onChange={(event) => update({ autopilot: event.target.checked })}
               />
-              Автопилот
+              {text.autopilot}
             </label>
           </section>
 
           <button className="start-button" disabled={!analysis} onClick={startGame}>
-            Старт
+            {text.start}
           </button>
 
           <ul className="legend">
-            <li>Пурпурный круг: клавиша A, S, D или нажатие на дорожку</li>
-            <li>Белый круг со стрелкой: ← ↑ → либо смахивание в ту же сторону, вокруг неё всегда есть свободное место</li>
-            <li>Золотая звезда: три звезды включают суперрежим, очки ×2 на 8 секунд</li>
-            <li>Пурпурный круг с лучом: зажмите и держите до конца</li>
-            <li>Парная нота: две клавиши сразу</li>
-            <li>Белая плашка SPACE: пробел, на телефоне касание верха экрана</li>
+            {text.legend.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
           </ul>
         </main>
       )}
 
       {screen === 'paused' && (
         <div className="overlay">
-          <h2>Пауза</h2>
+          <h2>{text.pause}</h2>
           <button className="start-button" onClick={togglePause}>
-            Продолжить
+            {text.resume}
           </button>
           <button className="text-button" onClick={startGame}>
-            Начать заново
+            {text.restart}
           </button>
           <button className="text-button" onClick={() => setScreen('menu')}>
-            В меню
+            {text.toMenu}
           </button>
         </div>
       )}
 
       {screen === 'results' && result && (
         <div className="overlay" data-testid="results">
-          <h2>{resultTitle(result)}</h2>
-          <div className="stars" aria-label={`Звёзд: ${result.stars} из 3`}>
-            <span className={result.stars >= 1 ? 'is-earned' : ''}>★</span>
-            <span className={result.stars >= 2 ? 'is-earned' : ''}>★</span>
-            <span className={result.stars >= 3 ? 'is-earned' : ''}>★</span>
-          </div>
-          {result.isNewBest && <div className="new-best">Новый рекорд!</div>}
+          <h2>{resultTitle(result, lang)}</h2>
+          <ResultStars
+            stars={result.stars}
+            isFlawless={isFlawless(result)}
+            sounds={soundsRef}
+            label={text.starsOf(result.stars)}
+          />
+          {result.isNewBest && <div className="new-best">{text.newBest}</div>}
           <dl className="stats">
             <div>
-              <dt>Очки</dt>
-              <dd>{result.score.toLocaleString('ru-RU')}</dd>
+              <dt>{text.score}</dt>
+              <dd>{result.score.toLocaleString(text.locale)}</dd>
             </div>
             <div>
-              <dt>Рекорд</dt>
-              <dd>{result.bestScore.toLocaleString('ru-RU')}</dd>
+              <dt>{text.best}</dt>
+              <dd>{result.bestScore.toLocaleString(text.locale)}</dd>
             </div>
             <div>
-              <dt>Точность</dt>
+              <dt>{text.accuracyTitle}</dt>
               <dd>{result.accuracyPercent}%</dd>
             </div>
             <div>
-              <dt>Лучшее комбо</dt>
+              <dt>{text.maxCombo}</dt>
               <dd>{result.maxCombo}</dd>
             </div>
             <div>
-              <dt>Точно / хорошо</dt>
+              <dt>{text.perfectGood}</dt>
               <dd>
                 {result.perfects} / {result.goods}
               </dd>
             </div>
             <div>
-              <dt>Промахи</dt>
+              <dt>{text.misses}</dt>
               <dd>{result.misses}</dd>
             </div>
           </dl>
           <button className="start-button" onClick={startGame}>
-            Ещё раз
+            {text.again}
           </button>
           <button className="text-button" onClick={() => setScreen('menu')}>
-            В меню
+            {text.toMenu}
           </button>
         </div>
       )}
