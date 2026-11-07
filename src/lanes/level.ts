@@ -122,7 +122,14 @@ const STEP_SLOTS = 4
 const LONG_STEP_SEC = 1.05
 const SHORT_STEP_SEC = 0.75
 /** С такой частоты слогов отрезок считается быстрой читкой. */
-const READING_MIN_RATE = 4.5
+const READING_MIN_RATE = 4
+/** Столько слогов в секунду значит, что голос читает, а не тянет звук. */
+const TALKING_RATE = 3
+const READING_WINDOW_SEC = 2
+const READING_STEP_SEC = 0.5
+const READING_JOIN_GAP_SEC = 1
+/** Короче этого всплеск слогов не считается читкой. */
+const READING_MIN_SEC = 2
 /** Порог подъёма для слогов внутри читки: ниже обычного, скороговорка почти без провалов. */
 const READING_RISE_DB = 1
 /** Если в паузе бита голос даёт столько слогов в секунду, это не пауза. */
@@ -260,9 +267,9 @@ export function generateLaneLevel(
   const parts = pulses === foundPulses ? firstParts : findSongParts(analysis, sustains, pulses)
   const picked = pickFramesWithMoments(analysis, difficulty, moments, focus, intensity, trace)
   const softChains = focus === 'voice' ? [] : splitPulses(pulses)
-  const reading = findReadingSpans(analysis, parts, sustains, focus)
+  const reading = findReadingSpans(analysis, sustains, focus)
   const isRead = (time: number) => reading.some((span) => time >= span.start && time < span.end)
-  const chains = focus === 'voice' ? [] : parts.filter((part) => !isRead(part.start)).map((part) => part.chain)
+  const chains = focus === 'voice' ? [] : parts.map((part) => part.chain)
   const heard = difficulty.isAdvanced ? allHeardFrames(analysis, picked) : picked
   const arranged = arrangeRhythm(picked, heard, softChains, chains, analysis.fps, difficulty, intensity)
   const { ladder, rhythmic, beats } = arranged
@@ -298,9 +305,9 @@ export function generateLaneLevel(
   const ladderFrames = new Set([...ladder, ...syllables])
   const isLadder = (note: LaneNote) => ladderFrames.has(Math.round(note.time * analysis.fps))
   const withPairs = addPairs(withArrows, difficulty, analysis, intensity, isLadder)
-  const withSustains = addSustainHolds(withPairs, difficulty, sustains)
+  const withSustains = addSustainHolds(withPairs, difficulty, sustains.filter((sustain) => !isRead(sustain.start)))
   const rhythmicFrames = new Set(rhythmic)
-  const withHolds = addHolds(withSustains, difficulty, moments, isLadder, analysis, beats, rhythmicFrames)
+  const withHolds = addHolds(withSustains, difficulty, moments, isLadder, analysis, beats, rhythmicFrames, reading)
   const withAccents = addAccents(withHolds, moments, sections, sustains, analysis, intensity)
   if (trace) trace.beforeLimit = withAccents
   // Последним: предыдущие шаги убирают ноты, и соседями могут оказаться ноты с одной дорожки
@@ -402,9 +409,17 @@ function addHolds(
   analysis: AudioAnalysis,
   beats: Map<number, number>,
   rhythmic: Set<number>,
+  reading: { start: number; end: number }[],
 ): LaneNote[] {
   const result: LaneNote[] = []
   const skipped = new Set<LaneNote>()
+  // В быстрой читке держать нечего: каждый слог это отдельное нажатие
+  const isInReading = (from: number, to: number) => reading.some((span) => span.start < to && span.end > from)
+  // Голос, который читает поверх, тоже раздувает середину звука, но держать тут нечего
+  const isTalking = (from: number, to: number) => {
+    const spoken = analysis.syllableTimes.filter((time) => time >= from && time < to).length
+    return spoken / Math.max(0.1, to - from) >= TALKING_RATE
+  }
   let holdCount = 0
   let lastHoldEnd = 0
 
@@ -425,7 +440,8 @@ function addHolds(
       const possible = Math.min(held, holdDuration(notes, i, moments, isBusy))
       if (held >= MELODY_HOLD_MIN_SEC && possible >= HOLD_MIN_SEC) duration = possible
     }
-    if (duration === 0) {
+    const isSpoken = duration > 0 && (isInReading(note.time, note.time + duration) || isTalking(note.time, note.time + duration))
+    if (duration === 0 || isSpoken) {
       result.push(note)
       continue
     }
@@ -716,10 +732,13 @@ function withoutSpokenPauses(moments: Moment[], analysis: AudioAnalysis): Moment
   })
 }
 
-/** Где уровень идёт за слогами: весь трек по голосу, в авто только быстрая читка, по ритму нигде. */
+/**
+ * Где уровень идёт за слогами: весь трек по голосу, в авто только быстрая читка,
+ * по ритму нигде. Частоту слогов смотрим скользящим окном в две секунды: читка
+ * часто ускоряется посреди куплета, и крупные отрезки включали её с опозданием.
+ */
 function findReadingSpans(
   analysis: AudioAnalysis,
-  parts: SongPart[],
   sustains: Moment[],
   focus: NoteFocus,
 ): { start: number; end: number }[] {
@@ -727,12 +746,18 @@ function findReadingSpans(
   if (focus === 'voice') return [{ start: 0, end: analysis.duration }]
 
   const spans: { start: number; end: number }[] = []
-  for (const part of parts) {
-    const count = analysis.syllableTimes.filter((time) => time >= part.start && time < part.end).length
-    const isHeld = sustains.some((sustain) => sustain.start < part.end && sustain.end > part.start)
-    if (!isHeld && count / (part.end - part.start) >= READING_MIN_RATE) spans.push({ start: part.start, end: part.end })
+  const half = READING_WINDOW_SEC / 2
+  for (let center = half; center < analysis.duration - half; center += READING_STEP_SEC) {
+    const count = analysis.syllableTimes.filter((time) => time >= center - half && time < center + half).length
+    const isHeld = sustains.some((sustain) => sustain.start < center && sustain.end > center)
+    if (isHeld || count / READING_WINDOW_SEC < READING_MIN_RATE) continue
+    const start = center - READING_STEP_SEC / 2
+    const last = spans[spans.length - 1]
+    // Короткий провал посреди читки её не прерывает: это вдох, а не конец куплета
+    if (last && start - last.end <= READING_JOIN_GAP_SEC) last.end = center + READING_STEP_SEC / 2
+    else spans.push({ start, end: center + READING_STEP_SEC / 2 })
   }
-  return spans
+  return spans.filter((span) => span.end - span.start >= READING_MIN_SEC)
 }
 
 /**
