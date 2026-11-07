@@ -56,14 +56,27 @@ const NOTE_SIZE = 0.42
  */
 const NOTE_TILT = 0.6
 const PLANE_SQUASH = Math.sin(NOTE_TILT)
-/** Стрелка лежит внутри круга и занимает меньше его ширины. */
-const ARROW_IN_COIN = 0.62
+/**
+ * Стрелка длиннее круга и выходит за его край с обеих сторон: силуэт уже не круглый,
+ * и его узнаёшь боковым зрением, даже среди белых нот.
+ */
+const ARROW_IN_COIN = 1
 /** Круг сжат наклоном, поэтому стрелке вверх нужна длина, а боковым нет. */
-const UP_ARROW_LENGTH = 1.5
-const UP_ARROW_WIDTH = 1.1
-const COIN_WITH_ARROW_COLOR = '#ffffff'
-const ARROW_ON_COIN_COLOR = '#0d4a48'
+const UP_ARROW_LENGTH = 1.25
+const UP_ARROW_WIDTH = 1.05
+/** Под стрелкой тёмная монета с кольцом: все ноты светлые, а эта наоборот. */
+const COIN_WITH_ARROW_COLOR = '#151a22'
+const COIN_UNDER_ARROW = 0.86
+const ARROW_ON_COIN_COLOR = '#ffffff'
 const FLYING_ARROW_COLOR = '#ffffff'
+/** Золотая обводка звезды, если сама звезда в палитре светлая и сливается с белыми нотами. */
+const STAR_OUTLINE_COLOR = '#e3ac3f'
+const STAR_OUTLINE_SCALE = 1.28
+/**
+ * Нота выходит из света на горизонте: первую часть пути она проявляется под ним,
+ * а не возникает точкой из пустоты. Доля пути, за которую нота проявляется полностью.
+ */
+const NOTE_REVEAL_SHARE = 0.22
 const MAX_FLYING_ARROWS = 6
 const ARROW_FLIGHT_SEC = 0.5
 const MAX_NOTES = 48
@@ -393,12 +406,18 @@ const noteVertex = /* glsl */ `
   varying vec3 vNormal;
   varying vec3 vWorld;
   varying float vRadius;
+  varying float vReveal;
+  #ifdef USE_INSTANCING
+    attribute float instanceReveal;
+  #endif
 
   void main() {
     #ifdef USE_INSTANCING
       mat4 toWorld = modelMatrix * instanceMatrix;
+      vReveal = instanceReveal;
     #else
       mat4 toWorld = modelMatrix;
+      vReveal = 1.0;
     #endif
     #ifdef USE_INSTANCING_COLOR
       vColor = instanceColor;
@@ -423,6 +442,7 @@ const noteFragment = /* glsl */ `
   varying vec3 vNormal;
   varying vec3 vWorld;
   varying float vRadius;
+  varying float vReveal;
 
   void main() {
     vec3 normal = normalize(vNormal);
@@ -448,7 +468,7 @@ const noteFragment = /* glsl */ `
     // Затенение в лунке: чем ближе к центру, тем глубже и темнее
     if (uShimmer > 0.5) color *= 0.42 + 0.58 * smoothstep(0.02, 0.36, vRadius);
 
-    gl_FragColor = vec4(color, uOpacity);
+    gl_FragColor = vec4(color, uOpacity * vReveal);
   }
 `
 
@@ -628,20 +648,65 @@ function arrowHeading(direction: number): number {
   return direction < 0 ? Math.PI : 0
 }
 
+/**
+ * Стрелка с закруглёнными углами: скруглённый хвост, оттянутые назад усы
+ * и мягкое острие. Каждая точка — угол контура и радиус его скругления.
+ */
 function createArrowGeometry(): THREE.BufferGeometry {
-  const shape = new THREE.Shape()
-  shape.moveTo(-0.46, -0.13)
-  shape.lineTo(0.04, -0.13)
-  shape.lineTo(0.04, -0.31)
-  shape.lineTo(0.46, 0)
-  shape.lineTo(0.04, 0.31)
-  shape.lineTo(0.04, 0.13)
-  shape.lineTo(-0.46, 0.13)
-  shape.closePath()
-  return extrudeFlat(shape, 0.14)
+  const corners: [number, number, number][] = [
+    [-0.7, -0.1, 0.09],
+    [0.16, -0.1, 0.03],
+    [0.06, -0.32, 0.07],
+    [0.72, 0, 0.09],
+    [0.06, 0.32, 0.07],
+    [0.16, 0.1, 0.03],
+    [-0.7, 0.1, 0.09],
+  ]
+  return extrudeFlat(createRoundedShape(corners), 0.12)
 }
 
-function createStarGeometry(): THREE.BufferGeometry {
+/** Многоугольник, у которого каждый угол срезан дугой: линия до дуги, дуга, линия дальше. */
+function createRoundedShape(corners: [number, number, number][]): THREE.Shape {
+  const shape = new THREE.Shape()
+  corners.forEach(([x, y, radius], index) => {
+    const [prevX, prevY] = corners[(index + corners.length - 1) % corners.length]
+    const [nextX, nextY] = corners[(index + 1) % corners.length]
+    const toPrev = Math.hypot(prevX - x, prevY - y)
+    const toNext = Math.hypot(nextX - x, nextY - y)
+    const inX = x + ((prevX - x) / toPrev) * radius
+    const inY = y + ((prevY - y) / toPrev) * radius
+    const outX = x + ((nextX - x) / toNext) * radius
+    const outY = y + ((nextY - y) / toNext) * radius
+    if (index === 0) shape.moveTo(inX, inY)
+    else shape.lineTo(inX, inY)
+    shape.quadraticCurveTo(x, y, outX, outY)
+  })
+  shape.closePath()
+  return shape
+}
+
+/** Свет на горизонте, из которого выходят ноты: мягкое пятно, вытянутое вширь. */
+function createGateTexture(): THREE.CanvasTexture {
+  const size = 128
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  if (ctx) {
+    const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2)
+    gradient.addColorStop(0, 'rgba(255,255,255,1)')
+    gradient.addColorStop(0.25, 'rgba(255,255,255,0.75)')
+    gradient.addColorStop(0.6, 'rgba(255,255,255,0.2)')
+    gradient.addColorStop(1, 'rgba(255,255,255,0)')
+    ctx.fillStyle = gradient
+    ctx.fillRect(0, 0, size, size)
+  }
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.NoColorSpace
+  return texture
+}
+
+function createStarGeometry(thickness = 0.14): THREE.BufferGeometry {
   const shape = new THREE.Shape()
   for (let i = 0; i < 10; i++) {
     const radius = i % 2 === 0 ? 0.5 : 0.23
@@ -652,7 +717,7 @@ function createStarGeometry(): THREE.BufferGeometry {
     else shape.lineTo(x, y)
   }
   shape.closePath()
-  return extrudeFlat(shape, 0.14)
+  return extrudeFlat(shape, thickness)
 }
 
 /** Буква клавиши внутри круга-цели. */
@@ -795,6 +860,11 @@ export class LaneScene {
   private spaceBurstAt = -Infinity
   private readonly swipeNotes: THREE.InstancedMesh
   private readonly starNotes: THREE.InstancedMesh
+  /** Золотая подложка чуть шире звезды: из-под светлой звезды видна обводка. */
+  private readonly starOutlines: THREE.InstancedMesh
+  /** Кольцо по краю тёмной монеты под стрелкой, в цвете нот палитры. */
+  private readonly arrowRings: THREE.InstancedMesh
+  private readonly gate: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>
   private readonly noteShadows: THREE.InstancedMesh
   private readonly flyingArrows: FlyingArrow[] = []
   private readonly sparkMesh: THREE.InstancedMesh
@@ -837,6 +907,14 @@ export class LaneScene {
     this.plainCoins = new THREE.InstancedMesh(coinGeometry, createNoteMaterial('#ffffff'), MAX_NOTES)
     this.swipeNotes = new THREE.InstancedMesh(arrowGeometry, createNoteMaterial('#ffffff'), MAX_NOTES)
     this.starNotes = new THREE.InstancedMesh(createStarGeometry(), createNoteMaterial('#ffffff'), MAX_NOTES)
+    // Подложка тоньше и опущена: верх звезды выше, и снаружи остаётся только золотой край
+    const outlineGeometry = createStarGeometry(0.08)
+    outlineGeometry.translate(0, -0.04, 0)
+    this.starOutlines = new THREE.InstancedMesh(outlineGeometry, createNoteMaterial('#ffffff'), MAX_NOTES)
+    const ringGeometry = new THREE.TorusGeometry(0.47, 0.045, 10, 48)
+    ringGeometry.rotateX(Math.PI / 2)
+    ringGeometry.translate(0, 0.1, 0)
+    this.arrowRings = new THREE.InstancedMesh(ringGeometry, createNoteMaterial('#ffffff'), MAX_NOTES)
 
     // Тень под нотой: именно она создаёт ощущение, что нота лежит на дорожке
     this.noteShadows = new THREE.InstancedMesh(
@@ -867,13 +945,30 @@ export class LaneScene {
     for (let i = 0; i < MAX_NOTES; i++) this.noteHalos.setColorAt(i, this.color.set(this.palette.tap))
     this.scene.add(this.noteHalos)
 
-    for (const mesh of [this.tapNotes, this.plainCoins, this.swipeNotes, this.starNotes]) {
+    for (const mesh of this.noteMeshes()) {
       mesh.frustumCulled = false
       mesh.renderOrder = 3
       // Без начального вызова setColorAt буфер цветов появится слишком поздно
       for (let i = 0; i < MAX_NOTES; i++) mesh.setColorAt(i, this.color.set('#ffffff'))
+      mesh.geometry.setAttribute('instanceReveal', new THREE.InstancedBufferAttribute(new Float32Array(MAX_NOTES).fill(1), 1))
       this.scene.add(mesh)
     }
+
+    // Свет на горизонте лежит поверх нот, поэтому новая нота выходит из него
+    this.gate = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({
+        map: createGateTexture(),
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    )
+    this.gate.position.set(0, VANISH_Y - 0.035, 0)
+    this.gate.frustumCulled = false
+    this.gate.renderOrder = 3.5
+    this.scene.add(this.gate)
 
     const spaceMaterial = new THREE.MeshBasicMaterial({
       map: createSpaceTexture(),
@@ -968,6 +1063,11 @@ export class LaneScene {
       this.shockwaves.push({ mesh, bornAt: -Infinity })
       this.scene.add(mesh)
     }
+  }
+
+  /** Все инстансы нот: им общие порядок отрисовки, проявление и обновление буферов. */
+  private noteMeshes(): THREE.InstancedMesh[] {
+    return [this.tapNotes, this.plainCoins, this.arrowRings, this.swipeNotes, this.starOutlines, this.starNotes]
   }
 
   private createScreenQuad(
@@ -1114,6 +1214,7 @@ export class LaneScene {
     this.trackColor.lerp(colorVector(hex), 0.04)
     for (const color of this.fanUniforms.uLaneColors.value) color.copy(this.trackColor)
     for (const color of this.ringColors) color.copy(this.trackColor)
+    this.gate.material.color.setRGB(this.trackColor.x, this.trackColor.y, this.trackColor.z, THREE.LinearSRGBColorSpace)
     for (const material of this.lightMaterials) {
       material.color.setRGB(this.trackColor.x, this.trackColor.y, this.trackColor.z, THREE.LinearSRGBColorSpace)
     }
@@ -1391,8 +1492,15 @@ export class LaneScene {
     let spaceCount = 0
     let swipeCount = 0
     let starCount = 0
+    let outlineCount = 0
+    let ringCount = 0
     let shadowCount = 0
     this.helper.rotation.order = 'ZXY'
+    const isStarLight = this.color.set(this.palette.special).getHSL({ h: 0, s: 0, l: 0 }).l > 0.8
+    const reveals = new Map<THREE.InstancedMesh, THREE.InstancedBufferAttribute>()
+    for (const mesh of this.noteMeshes()) {
+      reveals.set(mesh, mesh.geometry.getAttribute('instanceReveal') as THREE.InstancedBufferAttribute)
+    }
 
     for (let i = firstNote; i < notes.length; i++) {
       const note = notes[i]
@@ -1410,6 +1518,8 @@ export class LaneScene {
       // Залежавшаяся на чаше стрелка к концу своего окна чуть сжимается: скоро исчезнет
       const fading = isArrow ? Math.min(1, Math.max(0, (-remaining - SWIPE_LATE_SEC * 0.6) / (SWIPE_LATE_SEC * 0.4))) : 0
       const size = NOTE_SIZE * (spacing / LANE_SPREAD) * (1 - 0.3 * fading)
+      const fresh = (remaining / approachSec - (1 - NOTE_REVEAL_SHARE)) / NOTE_REVEAL_SHARE
+      const reveal = 1 - THREE.MathUtils.smoothstep(fresh, 0, 1)
 
       if (note.kind === 'space') {
         if (spaceCount < MAX_SPACE_BARS) {
@@ -1425,7 +1535,7 @@ export class LaneScene {
       // Тень лежит на дорожке чуть ниже ноты и сплющена так же, как сама нота
       this.helper.position.set(x, y - size * 0.1, 0)
       this.helper.rotation.set(0, 0, 0)
-      this.helper.scale.set(size * 1.08, size * 1.08 * PLANE_SQUASH, 1)
+      this.helper.scale.set(size * 1.08 * reveal, size * 1.08 * PLANE_SQUASH * reveal, 1)
       this.helper.updateMatrix()
       this.noteShadows.setMatrixAt(shadowCount, this.helper.matrix)
       shadowCount += 1
@@ -1434,7 +1544,7 @@ export class LaneScene {
       if (note.kind !== 'swipe') {
         this.helper.position.set(x, y, 0)
         this.helper.rotation.set(0, 0, 0)
-        this.helper.scale.set(size * 1.7, size * 1.7 * PLANE_SQUASH, 1)
+        this.helper.scale.set(size * 1.7 * reveal, size * 1.7 * PLANE_SQUASH * reveal, 1)
         this.helper.updateMatrix()
         this.noteHalos.setMatrixAt(haloCount, this.helper.matrix)
         this.noteHalos.setColorAt(haloCount, this.color.set(note.kind === 'star' ? this.palette.special : this.palette.tap))
@@ -1450,25 +1560,41 @@ export class LaneScene {
       if (note.kind === 'star') {
         this.starNotes.setMatrixAt(starCount, this.helper.matrix)
         this.starNotes.setColorAt(starCount, this.color.set(this.palette.special))
+        reveals.get(this.starNotes)?.setX(starCount, reveal)
         starCount += 1
-      } else {
-        if (note.kind === 'swipe') {
-          this.plainCoins.setMatrixAt(plainCount, this.helper.matrix)
-          this.plainCoins.setColorAt(plainCount, this.color.set(COIN_WITH_ARROW_COLOR))
-          plainCount += 1
-        } else {
-          // Цвет такой ноты задаёт перелив в шейдере
-          this.tapNotes.setMatrixAt(tapCount, this.helper.matrix)
-          const every = this.palette.whiteNoteEvery
-          const isWhite = every > 0 && note.id % every === 0
-          this.tapNotes.setColorAt(tapCount, this.color.set(isWhite ? '#ffffff' : this.palette.tap))
-          tapCount += 1
+        if (isStarLight) {
+          this.helper.scale.set(size * STAR_OUTLINE_SCALE, size, size * STAR_OUTLINE_SCALE)
+          this.helper.updateMatrix()
+          this.starOutlines.setMatrixAt(outlineCount, this.helper.matrix)
+          this.starOutlines.setColorAt(outlineCount, this.color.set(STAR_OUTLINE_COLOR))
+          reveals.get(this.starOutlines)?.setX(outlineCount, reveal)
+          outlineCount += 1
         }
+      } else if (note.kind === 'swipe') {
+        // Монета под стрелкой чуть меньше обычной: стрелка заметнее торчит за край
+        this.helper.scale.setScalar(size * COIN_UNDER_ARROW)
+        this.helper.updateMatrix()
+        this.plainCoins.setMatrixAt(plainCount, this.helper.matrix)
+        this.plainCoins.setColorAt(plainCount, this.color.set(COIN_WITH_ARROW_COLOR))
+        reveals.get(this.plainCoins)?.setX(plainCount, reveal)
+        plainCount += 1
+        this.arrowRings.setMatrixAt(ringCount, this.helper.matrix)
+        this.arrowRings.setColorAt(ringCount, this.color.set(this.palette.tap))
+        reveals.get(this.arrowRings)?.setX(ringCount, reveal)
+        ringCount += 1
+      } else {
+        // Цвет такой ноты задаёт перелив в шейдере
+        this.tapNotes.setMatrixAt(tapCount, this.helper.matrix)
+        const every = this.palette.whiteNoteEvery
+        const isWhite = every > 0 && note.id % every === 0
+        this.tapNotes.setColorAt(tapCount, this.color.set(isWhite ? '#ffffff' : this.palette.tap))
+        reveals.get(this.tapNotes)?.setX(tapCount, reveal)
+        tapCount += 1
       }
 
       if (note.kind === 'swipe') {
         // Стрелка приподнята над верхом круга, чтобы лежать на нём, а не внутри
-        const lift = size * 0.13
+        const lift = size * 0.12
         this.helper.position.set(x, y + lift * Math.cos(NOTE_TILT), lift * Math.sin(NOTE_TILT))
         this.helper.rotation.set(NOTE_TILT, arrowHeading(note.direction), 0)
         this.helper.scale.setScalar(size * ARROW_IN_COIN)
@@ -1480,6 +1606,7 @@ export class LaneScene {
         this.helper.updateMatrix()
         this.swipeNotes.setMatrixAt(swipeCount, this.helper.matrix)
         this.swipeNotes.setColorAt(swipeCount, this.color.set(ARROW_ON_COIN_COLOR))
+        reveals.get(this.swipeNotes)?.setX(swipeCount, reveal)
         swipeCount += 1
       }
       if (shadowCount >= MAX_NOTES) break
@@ -1494,12 +1621,20 @@ export class LaneScene {
     ;(this.tapNotes.material as THREE.ShaderMaterial).uniforms.uTime.value = time
     this.swipeNotes.count = swipeCount
     this.starNotes.count = starCount
+    this.starOutlines.count = outlineCount
+    this.arrowRings.count = ringCount
     this.noteShadows.count = shadowCount
     this.noteShadows.instanceMatrix.needsUpdate = true
-    for (const mesh of [this.tapNotes, this.plainCoins, this.swipeNotes, this.starNotes]) {
+    for (const mesh of this.noteMeshes()) {
       mesh.instanceMatrix.needsUpdate = true
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+      const reveal = reveals.get(mesh)
+      if (reveal) reveal.needsUpdate = true
     }
+    // Горизонт дышит с битом и сужается вместе с дорожками в узком окне
+    const gateWidth = (this.spread / LANE_SPREAD) * (0.34 + 0.05 * this.sharedUniforms.uBeat.value)
+    this.gate.scale.set(gateWidth, gateWidth * 0.42, 1)
+    this.gate.material.opacity = 0.7 + 0.3 * this.sharedUniforms.uBeat.value
     this.helper.rotation.order = 'XYZ' // искры и волны ждут обычный порядок поворотов
   }
 
