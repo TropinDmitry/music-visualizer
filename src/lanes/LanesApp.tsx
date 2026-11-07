@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent } from 'react'
 import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { AudioPlayer } from '../audio/AudioPlayer.ts'
 import { createEmptyFeatures, sampleFeatures } from '../audio/frameFeatures.ts'
@@ -10,10 +10,9 @@ import {
   DIFFICULTIES,
   findDifficulty,
   generateLaneLevel,
-  NOTE_FOCUSES,
   type DifficultyId,
-  type NoteFocus,
 } from './level.ts'
+import { guessPalette, PALETTE_CHOICES, PALETTES, type Palette, type PaletteChoice, type PaletteId } from './palettes.ts'
 import { SoundEffects } from './sounds.ts'
 import { findMoments, findSections, songIntensity, type Moment, type Section } from './structure.ts'
 import {
@@ -43,7 +42,7 @@ type Screen = 'menu' | 'playing' | 'paused' | 'results'
 
 interface Settings {
   difficulty: DifficultyId
-  focus: NoteFocus
+  palette: PaletteChoice
   approachSec: number
   volume: number
   effectsVolume: number
@@ -130,9 +129,6 @@ const NO_HOLDS = [null, null, null]
 const VIDEO_MAX_DRIFT_SEC = 0.15
 const LOW_ENERGY = 0.3
 /** Цвет дорожек по силе части песни: тихое холоднее, мощное теплее. */
-const CALM_SECTION_COLOR = '#5aa7ff'
-const NORMAL_SECTION_COLOR = '#2fd8cf'
-const STRONG_SECTION_COLORS = ['#ff8f5a', '#ffd24f']
 /** Сдвиг пальца, после которого касание считается смахиванием. */
 const SWIPE_MIN_PX = 35
 /** Какая доля экрана сверху на телефоне работает как пробел. */
@@ -155,18 +151,24 @@ const PRAISE: Record<number, string> = {
   500: 'АБСОЛЮТ',
 }
 
-function sectionColor(sections: Section[], time: number): string {
+function sectionColor(sections: Section[], time: number, palette: Palette): string {
   let strongCount = 0
   for (const section of sections) {
     const isStrong = section.level >= 0.7
     const isNow = time >= section.start && time < section.end
     if (isNow) {
-      if (isStrong) return STRONG_SECTION_COLORS[strongCount % STRONG_SECTION_COLORS.length]
-      return section.level < 0.35 ? CALM_SECTION_COLOR : NORMAL_SECTION_COLOR
+      if (isStrong) return palette.strong[strongCount % palette.strong.length]
+      return section.level < 0.35 ? palette.calm : palette.normal
     }
     if (isStrong) strongCount += 1
   }
-  return NORMAL_SECTION_COLOR
+  return palette.normal
+}
+
+/** Палитра, которая сейчас в игре: выбранная игроком или угаданная по треку. */
+function resolvePalette(choice: PaletteChoice, guessed: PaletteId | null): Palette {
+  if (choice !== 'auto') return PALETTES[choice]
+  return PALETTES[guessed ?? 'neon']
 }
 
 function loadBestScore(key: string): number {
@@ -225,10 +227,11 @@ export function LanesApp() {
   const [hud, setHud] = useState<Hud>(EMPTY_HUD)
   const [banner, setBanner] = useState<Banner | null>(null)
   const [popups, setPopups] = useState<Popup[]>([])
+  const [lostMultiplier, setLostMultiplier] = useState<{ id: number; from: number } | null>(null)
   const [result, setResult] = useState<GameResult | null>(null)
   const [settings, setSettings] = useState<Settings>({
     difficulty: 'normal',
-    focus: 'auto',
+    palette: 'auto',
     approachSec: 1.6,
     volume: 0.8,
     effectsVolume: 0.5,
@@ -240,6 +243,13 @@ export function LanesApp() {
     laneContrast: 0.75,
     autopilot: false,
   })
+  // Угадывание палитры читает весь трек, поэтому считается один раз на трек
+  const guessedPalette = useMemo(() => (analysis ? guessPalette(analysis) : null), [analysis])
+  const guessedPaletteRef = useRef<PaletteId | null>(null)
+  useEffect(() => {
+    guessedPaletteRef.current = guessedPalette
+  }, [guessedPalette])
+  const activePalette = resolvePalette(settings.palette, guessedPalette)
 
   // Цикл анимации живёт вне React и читает свежие значения через ref
   const liveRef = useRef({ screen, analysis, settings })
@@ -351,6 +361,10 @@ export function LanesApp() {
       if (game) {
         const currentMultiplier = multiplier(game)
         if (currentMultiplier > lastMultiplierRef.current) sounds?.multiplierUp(currentMultiplier)
+        // Множитель сбит: игрок должен заметить потерю, иначе ошибка проходит незаметно
+        if (currentMultiplier < lastMultiplierRef.current && lastMultiplierRef.current >= 2) {
+          setLostMultiplier({ id: nextIdRef.current + 1, from: lastMultiplierRef.current })
+        }
         lastMultiplierRef.current = currentMultiplier
       }
 
@@ -408,9 +422,12 @@ export function LanesApp() {
         sampleFeatures(currentAnalysis, time, features)
         soundsRef.current?.setVolume(current.effectsVolume)
         const songProgress = Math.min(1, time / currentAnalysis.duration)
-        scene.setHueShift(current.colorDrift ? songProgress * COLOR_DRIFT_RADIANS : 0)
+        const palette = resolvePalette(current.palette, guessedPaletteRef.current)
+        scene.setPalette(palette)
+        const canDrift = current.colorDrift && palette.allowsDrift
+        scene.setHueShift(canDrift ? songProgress * COLOR_DRIFT_RADIANS : 0)
         applyMoments(time, clockTime)
-        scene.setTrackColor(sectionColor(sectionsRef.current, time))
+        scene.setTrackColor(sectionColor(sectionsRef.current, time, palette))
         // Сила серии растёт с уровнем, а не с каждой нотой: так шаги заметны
         const tierCount = STREAK_TIERS.length - 1
         scene.setStreak((streakTier(game.combo) + streakProgress(game.combo) * 0.5) / tierCount, isOverdrive(game, time))
@@ -444,7 +461,9 @@ export function LanesApp() {
       }
 
       if (!isPlaying) {
-        scene.setTrackColor(NORMAL_SECTION_COLOR)
+        const palette = resolvePalette(current.palette, guessedPaletteRef.current)
+        scene.setPalette(palette)
+        scene.setTrackColor(palette.normal)
         scene.setMood(0, 0)
         scene.setStreak(0, false)
       }
@@ -669,7 +688,7 @@ export function LanesApp() {
     const player = playerRef.current
     if (!analysis || !player) return
     const difficulty = findDifficulty(settings.difficulty)
-    gameRef.current = createLaneGame(generateLaneLevel(analysis, difficulty, settings.focus), difficulty)
+    gameRef.current = createLaneGame(generateLaneLevel(analysis, difficulty), difficulty)
     lastMultiplierRef.current = 1
     playedImpactsRef.current = new Set()
     setHud(EMPTY_HUD)
@@ -703,6 +722,12 @@ export function LanesApp() {
           className={`hud tier-${hud.multiplier} streak-${hud.streakTier} ${hud.isInDanger ? 'is-danger' : ''} ${
             hud.isOverdrive ? 'is-overdrive' : ''
           }`}
+          style={
+            {
+              '--tier': activePalette.tiers[hud.multiplier - 1],
+              '--level': hud.multiplier,
+            } as CSSProperties
+          }
         >
           <div className="score-bar">
             <strong className="score-value">{hud.score.toLocaleString('ru-RU')}</strong>
@@ -723,6 +748,11 @@ export function LanesApp() {
           </div>
 
           <div className="side-pill side-left">
+            {lostMultiplier && (
+              <span className="multiplier-lost" key={lostMultiplier.id}>
+                −×{lostMultiplier.from}
+              </span>
+            )}
             {/* key заново запускает анимацию на каждой ноте */}
             <strong className="pill-main" key={`multiplier-${hud.multiplier}`}>
               ×{hud.multiplier}
@@ -835,18 +865,25 @@ export function LanesApp() {
                 </button>
               ))}
             </div>
-            <div className="segmented" aria-label="На что ориентируются ноты">
-              {NOTE_FOCUSES.map((focus) => (
+            <div className="segmented palette-list" aria-label="Палитра">
+              {PALETTE_CHOICES.map((choice) => (
                 <button
-                  key={focus.id}
-                  className={focus.id === settings.focus ? 'is-active' : ''}
-                  onClick={() => update({ focus: focus.id })}
+                  key={choice.id}
+                  className={choice.id === settings.palette ? 'is-active' : ''}
+                  onClick={() => update({ palette: choice.id })}
                 >
-                  {focus.label}
+                  {choice.id !== 'auto' && <i className="swatch" style={{ background: PALETTES[choice.id].normal }} />}
+                  {choice.label}
                 </button>
               ))}
             </div>
-            <p className="focus-hint">{NOTE_FOCUSES.find((focus) => focus.id === settings.focus)?.hint}</p>
+            <p className="focus-hint">
+              {settings.palette === 'auto'
+                ? guessedPalette
+                  ? `Игра выбрала по звуку: ${PALETTES[guessedPalette].label}`
+                  : 'Палитра подберётся по звуку трека'
+                : 'Палитра выбрана вручную'}
+            </p>
             <div className="segmented look-list">
               {CLIP_LOOKS.map((look) => (
                 <button

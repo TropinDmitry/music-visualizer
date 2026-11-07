@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { analyzeAudio, mixToMono } from '../audio/analyzer.ts'
 import { synthesizeDemoTrack } from '../audio/demoTrack.ts'
 import { compareTake } from './compareTake.ts'
+import { guessPalette, PALETTES } from './palettes.ts'
 import { findMoments, findSections, findSoftPulses, withoutPulses,
   findSustains, songIntensity, type Moment } from './structure.ts'
 import { DIFFICULTIES, findDifficulty, generateLaneLevel, type LaneNote } from './level.ts'
@@ -443,6 +444,31 @@ describe('плотность по силе песни', () => {
     const calm = starts.filter((time) => time >= 5 && time < 20).length
     const loud = starts.filter((time) => time >= 30 && time < 45).length
     expect(loud).toBeGreaterThan(calm * 1.3)
+  })
+})
+
+describe('палитры', () => {
+  it('низкий тон остаётся неоном, высокий мягкий розовый, плотный шум без мелодии тяжёлый', () => {
+    const rate = 44100
+    const toneOf = (hz: number) => {
+      const tone = new Float32Array(rate * 12)
+      for (let i = 0; i < tone.length; i++) tone[i] = 0.4 * Math.sin((2 * Math.PI * hz * i) / rate)
+      return analyzeAudio(tone, rate)
+    }
+    expect(guessPalette(toneOf(220))).toBe('neon')
+    expect(guessPalette(toneOf(660))).toBe('pink')
+
+    const noise = new Float32Array(rate * 12)
+    let seed = 7
+    for (let i = 0; i < noise.length; i++) {
+      seed = (seed * 16807) % 2147483647
+      noise[i] = 0.5 * (seed / 2147483647 - 0.5)
+    }
+    expect(['dark', 'fire']).toContain(guessPalette(analyzeAudio(noise, rate)))
+  })
+
+  it('у каждой палитры восемь цветов ступеней множителя', () => {
+    for (const palette of Object.values(PALETTES)) expect(palette.tiers).toHaveLength(8)
   })
 })
 

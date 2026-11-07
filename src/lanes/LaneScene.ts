@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { PALETTES, type Palette } from './palettes.ts'
 import type { FrameFeatures } from '../audio/frameFeatures.ts'
 import { FULLSCREEN_VERTEX, NOISE_GLSL } from '../render/glsl.ts'
 import type { LaneNote } from './level.ts'
@@ -29,7 +30,6 @@ const LOOK_NUMBERS: Record<ClipLook, number> = { outline: 0, duotone: 1, comic: 
  */
 const TRACK_COLOR = '#2fd8cf'
 const LANE_COLORS = [TRACK_COLOR, TRACK_COLOR, TRACK_COLOR]
-const TAP_COLOR = '#b84dff'
 /** Почти чёрный глянцевый корпус: на нём сильнее читается светящееся кольцо. */
 const PLATFORM_BODY_COLOR = '#1b2428'
 /** Свет в кнопке в покое: она горит всегда, как лампа, а на нажатии ярче. */
@@ -37,8 +37,6 @@ const PLATFORM_IDLE_LIGHT = 0.5
 const SPECIAL_COLOR = '#ffc933'
 const LANE_KEYS = ['A', 'S', 'D']
 /** Цвет дорожек на множителях ×1…×4: игра явно меняется, пока серия растёт. */
-/** Цвет дорожек по множителю: от зелёного к белому, на ×8 почти белый свет. */
-const TIER_COLORS = ['#3dff9e', '#2ef2d0', '#5fe8ff', '#8fd4ff', '#9dffc4', '#c4ffe0', '#d9fff0', '#f2fff9']
 
 /** Точка схода дорожек и линия нажатия, по вертикали экрана (-1 низ, 1 верх). */
 const VANISH_Y = 0.94
@@ -94,6 +92,11 @@ const clipFragment = /* glsl */ `
   uniform float uEnergy;
   uniform float uDim;
   uniform float uHueShift;
+  uniform vec3 uTint;
+  uniform float uTintAmount;
+  uniform float uBackgroundLight;
+  uniform vec3 uCloudLow;
+  uniform vec3 uCloudHigh;
   uniform float uFocus;
   uniform float uTension;
   uniform float uStillness;
@@ -188,7 +191,7 @@ const clipFragment = /* glsl */ `
     float streak = smoothstep(0.82, 1.0, seed) * smoothstep(0.75, 1.0, fract(depth * 0.35 + travel * (0.5 + seed)));
 
     float cloud = valueNoise(vec3(cos(angle) * 1.5, sin(angle) * 1.5, depth * 0.25 + travel * 0.5));
-    vec3 color = mix(vec3(0.0, 0.03, 0.05), vec3(0.03, 0.34, 0.26), smoothstep(-0.2, 0.7, cloud));
+    vec3 color = mix(uCloudLow, uCloudHigh, smoothstep(-0.2, 0.7, cloud));
 
     // Кольца на басу бегут от центра к краям кадра
     float rings = pow(0.5 + 0.5 * sin(depth * 2.0 + travel * 6.0), 12.0);
@@ -214,6 +217,8 @@ const clipFragment = /* glsl */ `
       color = spaceFlight();
     }
     color = rotateHue(color, uHueShift);
+    // Палитра окрашивает клип в свой цвет и задаёт общую яркость фона
+    color = mix(color, luma(color) * uTint * 1.6, uTintAmount) * uBackgroundLight;
 
     // Немного снижаем насыщенность: долгая игра не должна утомлять глаза.
     // В паузе песни цвет уходит сильнее, как будто всё замирает.
@@ -359,6 +364,8 @@ const noteFragment = /* glsl */ `
   uniform float uOpacity;
   uniform float uShimmer;
   uniform float uTime;
+  uniform vec3 uShimmerFrom;
+  uniform vec3 uShimmerTo;
   varying vec3 vColor;
   varying vec3 vNormal;
   varying vec3 vWorld;
@@ -373,10 +380,10 @@ const noteFragment = /* glsl */ `
     vec3 base = vColor;
 
     // Перелив: цвет зависит от наклона поверхности и времени, как у перламутра.
-    // Оттенок гуляет только в пурпурной гамме, поэтому нота остаётся узнаваемой.
+    // Оттенок гуляет между двумя цветами палитры, поэтому нота остаётся узнаваемой.
     if (uShimmer > 0.5) {
       float wave = 0.5 + 0.5 * sin(dot(normal, vec3(2.4, 3.2, 1.6)) + vWorld.x * 4.0 + vWorld.y * 3.0 + uTime * 2.2);
-      base = mix(vec3(0.5, 0.2, 1.0), vec3(1.0, 0.32, 0.9), wave);
+      base = mix(uShimmerFrom, uShimmerTo, wave);
       base = mix(base, vec3(0.35, 0.65, 1.0), smoothstep(0.82, 1.0, wave) * 0.45);
     }
 
@@ -395,6 +402,8 @@ function createNoteMaterial(color: string, useDepth = true, shimmer = false): TH
       uColor: { value: colorVector(color) },
       uOpacity: { value: 1 },
       uShimmer: { value: shimmer ? 1 : 0 },
+      uShimmerFrom: { value: new THREE.Vector3(...PALETTES.neon.shimmer[0]) },
+      uShimmerTo: { value: new THREE.Vector3(...PALETTES.neon.shimmer[1]) },
       uTime: { value: 0 },
     },
     vertexShader: noteVertex,
@@ -662,7 +671,7 @@ export class LaneScene {
     uViewAspect: { value: 1 },
     uTrackTime: { value: 0 },
     uBeat: { value: 0 },
-    uTierColor: { value: colorVector(TIER_COLORS[0]) },
+    uTierColor: { value: colorVector(PALETTES.neon.tiers[0]) },
     uSpread: { value: LANE_SPREAD },
     uBundle: { value: LANE_BUNDLE },
     uBend: { value: LANE_BEND },
@@ -683,6 +692,11 @@ export class LaneScene {
     uEnergy: { value: 0 },
     uDim: { value: 0.55 },
     uHueShift: { value: 0 },
+    uTint: { value: new THREE.Vector3(1, 1, 1) },
+    uTintAmount: { value: 0 },
+    uBackgroundLight: { value: 1 },
+    uCloudLow: { value: new THREE.Vector3(...PALETTES.neon.cloudLow) },
+    uCloudHigh: { value: new THREE.Vector3(...PALETTES.neon.cloudHigh) },
     uFocus: { value: 0.85 },
     uVanish: { value: new THREE.Vector2(0, VANISH_Y) },
   }
@@ -696,6 +710,8 @@ export class LaneScene {
     uBeams: { value: createEmptyBeams() },
     uBeamHeld: { value: new Array(MAX_BEAMS).fill(0) },
   }
+  /** Палитра: цвета нот, ступеней множителя, тонировка клипа. */
+  private palette: Palette = PALETTES.neon
   /** Текущий цвет дорожек и колец: плавно идёт к цвету новой части песни. */
   private readonly trackColor = colorVector(TRACK_COLOR)
   private readonly ringColors: THREE.Vector3[] = []
@@ -775,7 +791,7 @@ export class LaneScene {
     this.noteHalos.frustumCulled = false
     this.noteHalos.renderOrder = 2.6
     this.noteHalos.count = 0
-    for (let i = 0; i < MAX_NOTES; i++) this.noteHalos.setColorAt(i, this.color.set(TAP_COLOR))
+    for (let i = 0; i < MAX_NOTES; i++) this.noteHalos.setColorAt(i, this.color.set(this.palette.tap))
     this.scene.add(this.noteHalos)
 
     for (const mesh of [this.tapNotes, this.plainCoins, this.swipeNotes, this.starNotes]) {
@@ -957,6 +973,24 @@ export class LaneScene {
     this.clipUniforms.uHasVideo.value = video !== null
   }
 
+  /** Меняет палитру: ноты, ступени множителя, окраска клипа и фон без клипа. */
+  setPalette(palette: Palette): void {
+    if (palette === this.palette) return
+    this.palette = palette
+    this.clipUniforms.uTint.value.set(...palette.tint)
+    this.clipUniforms.uTintAmount.value = palette.tintAmount
+    this.clipUniforms.uBackgroundLight.value = palette.backgroundLight
+    this.clipUniforms.uCloudLow.value.set(...palette.cloudLow)
+    this.clipUniforms.uCloudHigh.value.set(...palette.cloudHigh)
+    for (let i = 0; i < MAX_NOTES; i++) this.noteHalos.setColorAt(i, this.color.set(palette.tap))
+    const noteUniforms = (this.tapNotes.material as THREE.ShaderMaterial).uniforms
+    noteUniforms.uShimmerFrom.value.set(...palette.shimmer[0])
+    noteUniforms.uShimmerTo.value.set(...palette.shimmer[1])
+    // Новая палитра включается сразу, плавно меняются только части песни внутри неё
+    this.trackColor.copy(colorVector(palette.normal))
+    this.setTrackColor(palette.normal)
+  }
+
   /** Поворот оттенка всего фона в радианах: так клип меняет цвет по ходу песни. */
   setHueShift(angle: number): void {
     this.clipUniforms.uHueShift.value = angle
@@ -1017,7 +1051,7 @@ export class LaneScene {
   /** Взрыв песни: волны сразу от всех кнопок. Клип при этом не вспыхивает. */
   impactEffect(clockTime: number): void {
     for (let lane = 0; lane < 3; lane++) {
-      this.addShockwave(lane, LANE_COLORS[lane], clockTime)
+      this.addShockwave(lane, this.palette.normal, clockTime)
       this.fanUniforms.uLaneGlow.value[lane] = 0.8
       this.targets[lane].squash = 1.2
     }
@@ -1070,9 +1104,9 @@ export class LaneScene {
     this.fanUniforms.uLaneGlow.value[lane] = 1
     this.targets[lane].squash = isPerfect ? 1.22 : 1.12
     this.targets[lane].light.opacity = 1
-    const color = isPerfect ? '#ffffff' : TAP_COLOR
+    const color = isPerfect ? '#ffffff' : this.palette.tap
     this.addShockwave(lane, color, clockTime)
-    if (isPerfect) this.addShockwave(lane, TAP_COLOR, clockTime - 0.08)
+    if (isPerfect) this.addShockwave(lane, this.palette.tap, clockTime - 0.08)
 
     const count = isPerfect ? 14 : 8
     for (let i = 0; i < count; i++) {
@@ -1086,7 +1120,7 @@ export class LaneScene {
       spark.speedX = Math.cos(angle) * speed
       spark.speedY = Math.sin(angle) * speed
       spark.bornAt = clockTime
-      spark.color.set(i % 3 === 0 ? '#ffffff' : TAP_COLOR)
+      spark.color.set(i % 3 === 0 ? '#ffffff' : this.palette.tap)
     }
   }
 
@@ -1123,7 +1157,7 @@ export class LaneScene {
 
     this.sharedUniforms.uTrackTime.value = features.time
     this.sharedUniforms.uBeat.value = features.beatPulse
-    this.sharedUniforms.uTierColor.value.copy(colorVector(TIER_COLORS[multiplier - 1]))
+    this.sharedUniforms.uTierColor.value.copy(colorVector(this.palette.tiers[multiplier - 1]))
     this.clipUniforms.uBass.value = features.bass
     this.clipUniforms.uEnergy.value = features.energy
     if (video && video.videoWidth > 0) {
@@ -1227,7 +1261,7 @@ export class LaneScene {
         this.helper.scale.set(size * 1.7, size * 1.7 * PLANE_SQUASH, 1)
         this.helper.updateMatrix()
         this.noteHalos.setMatrixAt(haloCount, this.helper.matrix)
-        this.noteHalos.setColorAt(haloCount, this.color.set(note.kind === 'star' ? SPECIAL_COLOR : TAP_COLOR))
+        this.noteHalos.setColorAt(haloCount, this.color.set(note.kind === 'star' ? SPECIAL_COLOR : this.palette.tap))
         haloCount += 1
       }
 
@@ -1249,7 +1283,7 @@ export class LaneScene {
         } else {
           // Цвет такой ноты задаёт перелив в шейдере
           this.tapNotes.setMatrixAt(tapCount, this.helper.matrix)
-          this.tapNotes.setColorAt(tapCount, this.color.set(TAP_COLOR))
+          this.tapNotes.setColorAt(tapCount, this.color.set(this.palette.tap))
           tapCount += 1
         }
       }
@@ -1338,7 +1372,7 @@ export class LaneScene {
       spark.speedX = Math.cos(angle) * 0.7
       spark.speedY = Math.sin(angle) * 1.1
       spark.bornAt = clockTime
-      spark.color.set(TAP_COLOR)
+      spark.color.set(this.palette.tap)
     }
   }
 

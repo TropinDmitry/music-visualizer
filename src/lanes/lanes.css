@@ -17,20 +17,10 @@
 
 /* --- Экран игры: минимум рамок, главное здесь лучи и клип --- */
 
+/* --tier и --level задаёт игра: цвет ступени из палитры и номер множителя 1…8 */
 .hud {
   --tier: var(--green);
-}
-
-.hud.tier-2 {
-  --tier: var(--mint);
-}
-
-.hud.tier-3 {
-  --tier: #9dffc4;
-}
-
-.hud.tier-4 {
-  --tier: #d9fff0;
+  --level: 1;
 }
 
 /* Красная рамка по краям экрана: предупреждение без вспышки в центре */
@@ -118,13 +108,86 @@
   border-color: #ff5c6c;
 }
 
+/* Чем выше множитель, тем крупнее цифра, сильнее свечение и резче появление */
 .pill-main {
-  font-size: 28px;
+  font-size: calc(24px + var(--level) * 3px);
   font-weight: 800;
   line-height: 1;
   color: #ffffff;
   font-variant-numeric: tabular-nums;
-  animation: combo-pop 0.3s ease-out;
+  text-shadow: 0 0 calc(var(--level) * 3px) var(--tier);
+  animation: multiplier-pop 0.45s cubic-bezier(0.2, 1.6, 0.4, 1);
+}
+
+@keyframes multiplier-pop {
+  from {
+    transform: scale(calc(1.2 + var(--level) * 0.1)) rotate(-4deg);
+    color: var(--tier);
+  }
+}
+
+/* С ×5 цифра дышит, на ×8 горит постоянно */
+.tier-5 .pill-main,
+.tier-6 .pill-main,
+.tier-7 .pill-main {
+  animation:
+    multiplier-pop 0.45s cubic-bezier(0.2, 1.6, 0.4, 1),
+    multiplier-glow 1.2s ease-in-out 0.45s infinite;
+}
+
+.tier-8 .pill-main {
+  color: var(--tier);
+  animation:
+    multiplier-pop 0.45s cubic-bezier(0.2, 1.6, 0.4, 1),
+    multiplier-glow 0.6s ease-in-out 0.45s infinite;
+}
+
+@keyframes multiplier-glow {
+  50% {
+    text-shadow: 0 0 calc(var(--level) * 6px) var(--tier), 0 0 4px #ffffff;
+  }
+}
+
+.tier-6 .side-left,
+.tier-7 .side-left,
+.tier-8 .side-left {
+  box-shadow: 0 0 calc(var(--level) * 3px) var(--tier);
+}
+
+/* Множитель сбит: панель вспыхивает красным и вздрагивает, потерянная ступень улетает */
+.multiplier-lost {
+  position: absolute;
+  inset: -2px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 6px 10px;
+  border-radius: inherit;
+  background: rgba(255, 40, 60, 0.55);
+  color: #ffffff;
+  font-weight: 800;
+  font-size: 18px;
+  pointer-events: none;
+  animation: multiplier-lost 0.8s ease-out forwards;
+}
+
+@keyframes multiplier-lost {
+  0% {
+    opacity: 1;
+    transform: translateX(-6px);
+  }
+  15% {
+    transform: translateX(6px);
+  }
+  30% {
+    transform: translateX(-3px);
+  }
+  45% {
+    transform: translateX(0);
+  }
+  100% {
+    opacity: 0;
+  }
 }
 
 .pill-note {
@@ -406,4 +469,20 @@
   font-size: clamp(32px, 6vw, 60px);
   letter-spacing: 0.16em;
   margin-right: -0.16em;
+}
+
+/* Выбор палитры: пять кнопок в одну строку, у каждой полоска своего цвета */
+.palette-list button {
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.swatch {
+  display: block;
+  width: 22px;
+  height: 4px;
+  border-radius: 2px;
 }
