@@ -23,6 +23,9 @@
   --level: 1;
   --overdrive: #ffc933;
   --special: #ffc933;
+  /* Цвет нот палитры: им светятся серия и счёт, а полоска энергии берёт яркий цвет дорожек */
+  --accent: #b84dff;
+  --energy: var(--mint);
 }
 
 /* Красная рамка по краям экрана: предупреждение без вспышки в центре */
@@ -225,7 +228,7 @@
 }
 
 .energy-bar div {
-  background: var(--mint);
+  background: var(--energy);
 }
 
 .is-danger .energy-bar div {
@@ -401,7 +404,7 @@
   font-weight: 800;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: #d9b8ff;
+  color: color-mix(in srgb, var(--accent) 45%, #ffffff);
 }
 
 .streak-bar {
@@ -414,25 +417,25 @@
 
 .streak-bar div {
   height: 100%;
-  background: #b84dff;
+  background: var(--accent);
   transition: width 0.15s;
 }
 
 .streak-2 .score-value {
-  text-shadow: 0 0 14px rgba(184, 77, 255, 0.7);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 .streak-3 .score-value {
   font-size: clamp(36px, 6vh, 54px);
-  text-shadow: 0 0 22px rgba(184, 77, 255, 0.95);
+  text-shadow: 0 0 22px color-mix(in srgb, var(--accent) 95%, transparent);
 }
 
 .streak-4 .score-value {
   font-size: clamp(40px, 7vh, 62px);
-  color: #f3e6ff;
+  color: color-mix(in srgb, var(--accent) 12%, #ffffff);
   text-shadow:
-    0 0 26px #b84dff,
-    0 0 54px rgba(184, 77, 255, 0.7);
+    0 0 26px var(--accent),
+    0 0 54px color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 .star-pips {

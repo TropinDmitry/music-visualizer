@@ -467,6 +467,19 @@ describe('палитры', () => {
     expect(['dark', 'fire']).toContain(guessPalette(analyzeAudio(noise, rate)))
   })
 
+  it('рэп на гулком басу 808 получает Люкс', () => {
+    const rate = 44100
+    const samples = new Float32Array(rate * 12)
+    for (let start = 0; start < samples.length; start += Math.round(rate * 0.25)) {
+      for (let i = 0; i < rate * 0.22 && start + i < samples.length; i++) {
+        const t = i / rate
+        samples[start + i] += 0.6 * Math.sin(2 * Math.PI * 50 * t) * Math.exp(-t * 6)
+      }
+    }
+    for (let i = 0; i < samples.length; i++) samples[i] += 0.03 * Math.sin((2 * Math.PI * 600 * i) / rate)
+    expect(guessPalette(analyzeAudio(samples, rate))).toBe('luxe')
+  })
+
   it('у каждой палитры восемь цветов ступеней множителя', () => {
     for (const palette of Object.values(PALETTES)) expect(palette.tiers).toHaveLength(8)
   })

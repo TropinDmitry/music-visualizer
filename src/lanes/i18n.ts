@@ -109,7 +109,7 @@ const RU = {
   perfectGood: 'Точно / хорошо',
   misses: 'Промахи',
   difficulties: { easy: 'Лёгкая', normal: 'Средняя', hard: 'Сложная' } as Record<DifficultyId, string>,
-  palettes: { auto: 'Авто', neon: 'Неон', fire: 'Огонь', dark: 'Тьма', pink: 'Розовая' } as Record<PaletteChoice, string>,
+  palettes: { auto: 'Авто', neon: 'Неон', fire: 'Огонь', dark: 'Тьма', pink: 'Розовая', luxe: 'Люкс' } as Record<PaletteChoice, string>,
   looks: { outline: 'Неоновый контур', duotone: 'Дуотон', comic: 'Комикс', original: 'Оригинал' } as Record<ClipLook, string>,
 }
 
@@ -187,7 +187,7 @@ const EN: Texts = {
   perfectGood: 'Perfect / good',
   misses: 'Misses',
   difficulties: { easy: 'Easy', normal: 'Normal', hard: 'Hard' },
-  palettes: { auto: 'Auto', neon: 'Neon', fire: 'Fire', dark: 'Dark', pink: 'Pink' },
+  palettes: { auto: 'Auto', neon: 'Neon', fire: 'Fire', dark: 'Dark', pink: 'Pink', luxe: 'Luxe' },
   looks: { outline: 'Neon outline', duotone: 'Duotone', comic: 'Comic', original: 'Original' },
 }
 

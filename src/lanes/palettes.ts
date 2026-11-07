@@ -6,9 +6,11 @@ import type { AudioAnalysis } from '../audio/analyzer.ts'
  * игра угадывает её по звуку.
  */
 
-export type PaletteId = 'neon' | 'fire' | 'dark' | 'pink'
+export type PaletteId = 'neon' | 'fire' | 'dark' | 'pink' | 'luxe'
 export type PaletteChoice = PaletteId | 'auto'
-export type HitStyle = 'sparks' | 'embers' | 'petals'
+export type HitStyle = 'sparks' | 'embers' | 'petals' | 'glitter'
+/** Как выглядит луч: ровный свет, языки пламени или золотой атлас с блёстками. */
+export type BeamStyle = 'plain' | 'flame' | 'gold'
 
 export interface Palette {
   id: PaletteId
@@ -40,10 +42,10 @@ export interface Palette {
   /** Цвет суперрежима и короны света над дорожками. */
   overdrive: [number, number, number]
   crown: [number, number, number]
-  /** Цвет лучей удержания. В Огне луч горит языками пламени. */
+  /** Цвет лучей удержания. В Огне луч горит языками пламени, в Люксе переливается золотом. */
   beam: [number, number, number]
-  isFlameBeam: boolean
-  /** Чем рассыпается нота при попадании: искры, тлеющие угольки или лепестки. */
+  beamStyle: BeamStyle
+  /** Чем рассыпается нота при попадании: искры, угольки, лепестки или золотая пыль. */
   hitStyle: HitStyle
   /** Цвет звёзд-нот. */
   special: string
@@ -75,7 +77,7 @@ export const PALETTES: Record<PaletteId, Palette> = {
     overdrive: [1, 0.78, 0.25],
     crown: [0.62, 0.28, 1],
     beam: [0.72, 0.3, 1],
-    isFlameBeam: false,
+    beamStyle: 'plain',
     hitStyle: 'sparks',
     special: '#ffc933',
     whiteNoteEvery: 0,
@@ -101,7 +103,7 @@ export const PALETTES: Record<PaletteId, Palette> = {
     overdrive: [1, 0.9, 0.45],
     crown: [1, 0.3, 0.08],
     beam: [1, 0.4, 0.05],
-    isFlameBeam: true,
+    beamStyle: 'flame',
     hitStyle: 'embers',
     special: '#ffc933',
     whiteNoteEvery: 0,
@@ -127,7 +129,7 @@ export const PALETTES: Record<PaletteId, Palette> = {
     overdrive: [0.82, 0.85, 0.92],
     crown: [0.4, 0.4, 0.5],
     beam: [0.82, 0.84, 0.92],
-    isFlameBeam: false,
+    beamStyle: 'plain',
     hitStyle: 'sparks',
     special: '#e8ecf2',
     whiteNoteEvery: 3,
@@ -153,10 +155,40 @@ export const PALETTES: Record<PaletteId, Palette> = {
     overdrive: [1, 0.85, 0.95],
     crown: [1, 0.4, 0.8],
     beam: [1, 0.45, 0.8],
-    isFlameBeam: false,
+    beamStyle: 'plain',
     hitStyle: 'petals',
     special: '#ffc933',
     whiteNoteEvery: 0,
+    allowsDrift: false,
+  },
+  /**
+   * Дорогой рэп: тёмный шоколад, карамель и шампанское, без кислотных цветов.
+   * Ноты золотые с перламутровыми, звёзды как бриллианты, лучи атласные.
+   */
+  luxe: {
+    id: 'luxe',
+    label: 'Люкс',
+    calm: '#8a5a3c',
+    normal: '#c98f55',
+    strong: ['#d39c58', '#e2b46e'],
+    tap: '#d6a24e',
+    shimmer: [[0.62, 0.4, 0.17], [1, 0.84, 0.52]],
+    tiers: ['#a8714a', '#b9824f', '#c99556', '#d6a75f', '#e2b96c', '#ebcb84', '#f2dca6', '#fbf0d6'],
+    tint: [1, 0.78, 0.55],
+    tintAmount: 0.55,
+    backgroundLight: 0.75,
+    cloudLow: [0.05, 0.025, 0.012],
+    cloudHigh: [0.24, 0.13, 0.06],
+    spaceLight: 0.7,
+    cloudAccent: [0.3, 0.19, 0.07],
+    streakColor: [1, 0.86, 0.62],
+    overdrive: [1, 0.93, 0.74],
+    crown: [0.82, 0.58, 0.3],
+    beam: [0.95, 0.74, 0.38],
+    beamStyle: 'gold',
+    hitStyle: 'glitter',
+    special: '#eaf6ff',
+    whiteNoteEvery: 5,
     allowsDrift: false,
   },
 }
@@ -167,6 +199,7 @@ export const PALETTE_CHOICES: { id: PaletteChoice; label: string }[] = [
   { id: 'fire', label: 'Огонь' },
   { id: 'dark', label: 'Тьма' },
   { id: 'pink', label: 'Розовая' },
+  { id: 'luxe', label: 'Люкс' },
 ]
 
 /**
@@ -186,6 +219,12 @@ const PINK_MIN_PITCH = 61.5
 const PINK_MAX_PITCH = 65
 const MID_BINS_FROM = 20
 const MID_BINS_TO = 44
+/**
+ * Люкс: бас сильнее середины в разы, как у рэпа на 808. Lollipop даёт 10, электроника
+ * и тяжёлые гитары от 1 до 3. Чистый тон без ударов тоже весь в басу, поэтому нужен ещё ритм.
+ */
+const LUXE_MIN_BASS_SHARE = 5
+const LUXE_MIN_ONSET_RATE = 2
 /** Громкая половина трека: всё, что громче медианы. */
 const LOUD_PART_SHARE = 0.5
 
@@ -199,6 +238,8 @@ export function guessPalette(analysis: AudioAnalysis): PaletteId {
   // Высокий голос важнее тяжёлого звука: женский рок всё равно розовый
   const isHighVoice = features.medianPitch >= PINK_MIN_PITCH && features.medianPitch <= PINK_MAX_PITCH
   if (isHighVoice) return 'pink'
+  const isBoomingBass = features.bassShare >= LUXE_MIN_BASS_SHARE && features.onsetRate >= LUXE_MIN_ONSET_RATE
+  if (isBoomingBass) return 'luxe'
   const isHeavy = features.roughness < HEAVY_MID_ROUGHNESS && features.melodyShare < HEAVY_MELODY_SHARE
   if (!isHeavy) return 'neon'
   const isDark = features.melodyShare < DARK_MELODY_SHARE && features.onsetRate >= DARK_MIN_ONSET_RATE

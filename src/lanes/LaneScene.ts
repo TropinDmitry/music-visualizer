@@ -81,6 +81,11 @@ const EMBER_HOT = new THREE.Color('#ffb040')
 const EMBER_WARM = new THREE.Color('#e0300c')
 const EMBER_ASH = new THREE.Color('#3a2a24')
 const PETAL_COLORS = ['#ff5fae', '#ffd0e8', '#ffffff', '#c77dff']
+/** Золотая пыль: от тёмного золота до шампанского, изредка белая искра бриллианта. */
+const GLITTER_COLORS = ['#f6d27a', '#ffe9b8', '#c9973f', '#ffffff', '#e8b860']
+const GLITTER_LIFETIME_SEC = 1.15
+/** Блик бриллианта: четырёхлучевая звёздочка вспыхивает и гаснет. */
+const GLINT_LIFETIME_SEC = 0.5
 const MAX_SHOCKWAVES = 8
 const SHOCKWAVE_LIFETIME_SEC = 0.32
 
@@ -288,6 +293,7 @@ const fanFragment = /* glsl */ `
   uniform vec3 uOverdriveColor;
   uniform vec3 uBeamColor;
   uniform float uBeamFlame;
+  uniform float uBeamGold;
   uniform vec3 uBeams[6];
   uniform float uBeamHeld[6];
   varying vec2 vUv;
@@ -345,6 +351,16 @@ const fanFragment = /* glsl */ `
       vec3 flame = mix(vec3(0.85, 0.1, 0.02), vec3(1.0, 0.55, 0.08), smoothstep(0.1, 0.6, heat));
       flame = mix(flame, vec3(1.0, 0.92, 0.6), smoothstep(0.65, 1.0, heat) * (0.5 + 0.5 * uBeamHeld[i]));
       beamColor = mix(beamColor, flame, uBeamFlame);
+      // Золотой атлас: косые полосы блеска текут к игроку, края темнее, как у ткани на сгибе.
+      // Поверх мерцают блёстки: ячейки шума, которые по очереди вспыхивают
+      float satin = 0.5 + 0.5 * sin(distanceAway * 6.0 - uTrackTime * 4.5 + fromCenter * 22.0);
+      vec3 gold = mix(vec3(0.42, 0.24, 0.09), vec3(0.93, 0.72, 0.38), smoothstep(0.05, 0.85, core * (0.55 + 0.45 * satin)));
+      gold = mix(gold, vec3(1.0, 0.95, 0.82), pow(satin, 10.0) * core * (0.6 + 0.4 * uBeamHeld[i]));
+      vec2 cell = floor(vec2(distanceAway * 26.0 - uTrackTime * 9.0, laneCoord * 34.0));
+      float grain = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+      float glitter = step(0.9, grain) * pow(0.5 + 0.5 * sin(uTrackTime * 11.0 + grain * 60.0), 6.0);
+      gold += vec3(1.0, 0.97, 0.9) * glitter * core;
+      beamColor = mix(beamColor, gold, uBeamGold);
       color = mix(color, beamColor, core);
       alpha = max(alpha, core * (0.75 + 0.25 * uBeamHeld[i]));
     }
@@ -671,6 +687,9 @@ interface Target {
   jolt: number
 }
 
+/** Блик бриллианта не стиль попадания, а часть золотой пыли, поэтому вид частицы шире. */
+type SparkKind = HitStyle | 'glint'
+
 interface Spark {
   x: number
   y: number
@@ -679,7 +698,7 @@ interface Spark {
   bornAt: number
   color: THREE.Color
   /** Искра летит дугой, уголёк поднимается и остывает, лепесток кружится и опадает. */
-  kind: HitStyle
+  kind: SparkKind
   /** Случайный сдвиг фазы покачивания и вращения: частицы не движутся строем. */
   seed: number
 }
@@ -752,6 +771,7 @@ export class LaneScene {
     uBeamHeld: { value: new Array(MAX_BEAMS).fill(0) },
     uBeamColor: { value: new THREE.Vector3(...PALETTES.neon.beam) },
     uBeamFlame: { value: 0 },
+    uBeamGold: { value: 0 },
   }
   /** Палитра: цвета нот, ступеней множителя, тонировка клипа. */
   private palette: Palette = PALETTES.neon
@@ -771,6 +791,7 @@ export class LaneScene {
   private readonly flyingArrows: FlyingArrow[] = []
   private readonly sparkMesh: THREE.InstancedMesh
   private readonly petalMesh: THREE.InstancedMesh
+  private readonly glintMesh: THREE.InstancedMesh
   private readonly fanGroup = new THREE.Group()
   private readonly targets: Target[] = []
   private readonly sparks: Spark[] = []
@@ -916,8 +937,18 @@ export class LaneScene {
       this.petalMesh.setColorAt(i, this.color.set('#ffffff'))
       this.sparks.push({ x: 0, y: 0, speedX: 0, speedY: 0, bornAt: -Infinity, color: new THREE.Color(), kind: 'sparks', seed: 0 })
     }
+    this.glintMesh = new THREE.InstancedMesh(
+      createGlintGeometry(),
+      new THREE.MeshBasicMaterial({ transparent: true, depthTest: false, blending: THREE.AdditiveBlending }),
+      MAX_SPARKS,
+    )
+    this.glintMesh.frustumCulled = false
+    this.glintMesh.renderOrder = 6
+    this.glintMesh.count = 0
+    for (let i = 0; i < MAX_SPARKS; i++) this.glintMesh.setColorAt(i, this.color.set('#ffffff'))
     this.scene.add(this.sparkMesh)
     this.scene.add(this.petalMesh)
+    this.scene.add(this.glintMesh)
 
     for (let i = 0; i < MAX_SHOCKWAVES; i++) {
       const mesh = new THREE.Mesh(
@@ -1047,7 +1078,8 @@ export class LaneScene {
     this.clipUniforms.uCrownColor.value.set(...palette.crown)
     this.sharedUniforms.uOverdriveColor.value.set(...palette.overdrive)
     this.fanUniforms.uBeamColor.value.set(...palette.beam)
-    this.fanUniforms.uBeamFlame.value = palette.isFlameBeam ? 1 : 0
+    this.fanUniforms.uBeamFlame.value = palette.beamStyle === 'flame' ? 1 : 0
+    this.fanUniforms.uBeamGold.value = palette.beamStyle === 'gold' ? 1 : 0
     for (let i = 0; i < MAX_NOTES; i++) this.noteHalos.setColorAt(i, this.color.set(palette.tap))
     const noteUniforms = (this.tapNotes.material as THREE.ShaderMaterial).uniforms
     noteUniforms.uShimmerFrom.value.set(...palette.shimmer[0])
@@ -1172,16 +1204,18 @@ export class LaneScene {
     this.targets[lane].light.opacity = 1
     const style = this.palette.hitStyle
     // Волна от удара в характере палитры: у огня жаркая, у лепестков мягкая розовая
-    const waveColor = style === 'embers' ? '#ff8a1a' : style === 'petals' ? '#ffb3da' : this.palette.tap
+    const waveColor =
+      style === 'embers' ? '#ff8a1a' : style === 'petals' ? '#ffb3da' : style === 'glitter' ? '#f3d08a' : this.palette.tap
     this.addShockwave(lane, isPerfect && style === 'sparks' ? '#ffffff' : waveColor, clockTime)
     if (isPerfect) this.addShockwave(lane, this.palette.tap, clockTime - 0.08)
 
     if (style === 'embers') this.burnNote(lane, isPerfect, clockTime)
     else if (style === 'petals') this.scatterPetals(lane, isPerfect, clockTime)
+    else if (style === 'glitter') this.sprinkleGold(lane, isPerfect, clockTime)
     else this.throwSparks(lane, isPerfect, clockTime)
   }
 
-  private takeSpark(lane: number, clockTime: number, kind: HitStyle): Spark {
+  private takeSpark(lane: number, clockTime: number, kind: SparkKind): Spark {
     const spark = this.sparks[this.nextSpark]
     this.nextSpark = (this.nextSpark + 1) % MAX_SPARKS
     spark.x = this.laneX(lane)
@@ -1226,6 +1260,31 @@ export class LaneScene {
       spark.speedX = Math.cos(angle) * speed
       spark.speedY = Math.sin(angle) * speed
       spark.color.set(PETAL_COLORS[i % PETAL_COLORS.length])
+    }
+  }
+
+  /**
+   * Нота рассыпается золотой пылью: блёстки мягко разлетаются, мерцают и оседают.
+   * Точное попадание добавляет блики бриллиантов прямо над кнопкой.
+   */
+  private sprinkleGold(lane: number, isPerfect: boolean, clockTime: number): void {
+    const count = isPerfect ? 16 : 10
+    for (let i = 0; i < count; i++) {
+      const spark = this.takeSpark(lane, clockTime, 'glitter')
+      const angle = Math.PI * (0.05 + 0.9 * Math.random())
+      const speed = 0.3 + Math.random() * (isPerfect ? 0.6 : 0.4)
+      spark.speedX = Math.cos(angle) * speed
+      spark.speedY = Math.sin(angle) * speed
+      spark.color.set(GLITTER_COLORS[i % GLITTER_COLORS.length])
+    }
+    const glints = isPerfect ? 3 : 1
+    for (let i = 0; i < glints; i++) {
+      const glint = this.takeSpark(lane, clockTime + i * 0.07, 'glint')
+      glint.x += (Math.random() - 0.5) * 0.16
+      glint.y += 0.02 + Math.random() * 0.1
+      glint.speedX = 0
+      glint.speedY = 0
+      glint.color.set(i === 0 ? '#ffffff' : '#ffe6a8')
     }
   }
 
@@ -1472,12 +1531,16 @@ export class LaneScene {
     for (const note of holdingNotes) {
       if (!note) continue
       // У огненного луча из кнопки поднимаются угольки, у остальных бьют искры
-      const isEmber = this.palette.hitStyle === 'embers'
-      const spark = this.takeSpark(note.lane, clockTime, isEmber ? 'embers' : 'sparks')
+      const style = this.palette.hitStyle
+      const isEmber = style === 'embers'
+      // У золотого луча из кнопки сыплется золотая пыль
+      const isGold = style === 'glitter'
+      const spark = this.takeSpark(note.lane, clockTime, isEmber ? 'embers' : isGold ? 'glitter' : 'sparks')
       const angle = Math.PI * (0.2 + 0.6 * Math.random())
-      spark.speedX = Math.cos(angle) * (isEmber ? 0.2 : 0.7)
-      spark.speedY = Math.sin(angle) * (isEmber ? 0.5 : 1.1)
-      spark.color.set(this.palette.tap)
+      const slow = isEmber || isGold
+      spark.speedX = Math.cos(angle) * (slow ? 0.2 : 0.7)
+      spark.speedY = Math.sin(angle) * (slow ? 0.5 : 1.1)
+      spark.color.set(isGold ? GLITTER_COLORS[Math.floor(Math.random() * GLITTER_COLORS.length)] : this.palette.tap)
     }
   }
 
@@ -1501,8 +1564,45 @@ export class LaneScene {
   private updateSparks(clockTime: number): void {
     let count = 0
     let petalCount = 0
+    let glintCount = 0
     for (const spark of this.sparks) {
       const age = clockTime - spark.bornAt
+      if (spark.kind === 'glint') {
+        if (age < 0 || age >= GLINT_LIFETIME_SEC) continue
+        // Блик быстро вспыхивает и медленнее гаснет, чуть поворачиваясь
+        const life = age / GLINT_LIFETIME_SEC
+        const flash = Math.sin(Math.PI * Math.pow(life, 0.6))
+        this.helper.position.set(spark.x, spark.y, 0)
+        this.helper.rotation.set(0, 0, spark.seed * 0.2 + life * 0.8)
+        this.helper.scale.setScalar(0.3 + flash)
+        this.helper.updateMatrix()
+        this.glintMesh.setMatrixAt(glintCount, this.helper.matrix)
+        this.glintMesh.setColorAt(glintCount, this.color.copy(spark.color).multiplyScalar(flash))
+        glintCount += 1
+        continue
+      }
+
+      if (spark.kind === 'glitter') {
+        if (age >= GLITTER_LIFETIME_SEC) continue
+        const life = 1 - age / GLITTER_LIFETIME_SEC
+        // Пылинка быстро тормозит в воздухе и потом медленно оседает
+        const drift = 1 - Math.exp(-age * 4)
+        this.helper.position.set(
+          spark.x + (spark.speedX / 4) * drift,
+          spark.y + (spark.speedY / 4) * drift - 0.12 * age * age,
+          0,
+        )
+        this.helper.rotation.set(0, 0, 0)
+        // Мерцание блёсток: пылинка то вспыхивает, то почти пропадает
+        const twinkle = Math.pow(0.5 + 0.5 * Math.sin(age * 22 + spark.seed * 5), 2)
+        this.helper.scale.setScalar((0.35 + 0.9 * twinkle) * Math.min(1, life * 3))
+        this.helper.updateMatrix()
+        this.sparkMesh.setMatrixAt(count, this.helper.matrix)
+        this.sparkMesh.setColorAt(count, this.color.copy(spark.color).multiplyScalar(0.4 + 0.6 * twinkle))
+        count += 1
+        continue
+      }
+
       // Положение считается по возрасту, поэтому не зависит от частоты кадров
       if (spark.kind === 'petals') {
         if (age >= PETAL_LIFETIME_SEC) continue
@@ -1568,6 +1668,9 @@ export class LaneScene {
     this.petalMesh.count = petalCount
     this.petalMesh.instanceMatrix.needsUpdate = true
     if (this.petalMesh.instanceColor) this.petalMesh.instanceColor.needsUpdate = true
+    this.glintMesh.count = glintCount
+    this.glintMesh.instanceMatrix.needsUpdate = true
+    if (this.glintMesh.instanceColor) this.glintMesh.instanceColor.needsUpdate = true
   }
 
   private updateShockwaves(clockTime: number): void {
@@ -1598,4 +1701,21 @@ export class LaneScene {
     }
     this.renderer.dispose()
   }
+}
+
+/** Четырёхлучевая звёздочка блика: длинные лучи по вертикали и горизонтали, короткие по диагонали. */
+function createGlintGeometry(): THREE.ShapeGeometry {
+  const shape = new THREE.Shape()
+  const points = 16
+  for (let i = 0; i <= points; i++) {
+    const angle = (i / points) * Math.PI * 2
+    const isLong = i % 4 === 0
+    const isShort = i % 4 === 2
+    const radius = isLong ? 0.07 : isShort ? 0.025 : 0.008
+    const x = Math.cos(angle) * radius
+    const y = Math.sin(angle) * radius
+    if (i === 0) shape.moveTo(x, y)
+    else shape.lineTo(x, y)
+  }
+  return new THREE.ShapeGeometry(shape)
 }

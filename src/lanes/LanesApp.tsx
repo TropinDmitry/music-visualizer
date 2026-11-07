@@ -820,6 +820,8 @@ export function LanesApp() {
               '--level': hud.multiplier,
               '--overdrive': cssColor(activePalette.overdrive),
               '--special': activePalette.special,
+              '--accent': activePalette.tap,
+              '--energy': activePalette.normal,
             } as CSSProperties
           }
         >
