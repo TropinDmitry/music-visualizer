@@ -1,4 +1,4 @@
-import type { AudioAnalysis } from '../audio/analyzer.ts'
+import { findSyllables, type AudioAnalysis } from '../audio/analyzer.ts'
 import { beatWeight, pickNoteFrames } from '../game/level.ts'
 import {
   findMoments,
@@ -123,6 +123,10 @@ const LONG_STEP_SEC = 1.05
 const SHORT_STEP_SEC = 0.75
 /** С такой частоты слогов отрезок считается быстрой читкой. */
 const READING_MIN_RATE = 4.5
+/** Порог подъёма для слогов внутри читки: ниже обычного, скороговорка почти без провалов. */
+const READING_RISE_DB = 1
+/** Если в паузе бита голос даёт столько слогов в секунду, это не пауза. */
+const PAUSE_SPEECH_RATE = 2
 /** Ниже этой силы часть спокойная, выше второй мощная: лесенки только в мощной. */
 const CALM_LEVEL = 0.3
 const ACTIVE_LEVEL = 0.6
@@ -245,7 +249,7 @@ export function generateLaneLevel(
   focus: NoteFocus = 'auto',
   trace?: LevelTrace,
 ): LaneNote[] {
-  const moments = findMoments(analysis)
+  const moments = withoutSpokenPauses(findMoments(analysis), analysis)
   const intensity = songIntensity(analysis)
   const rawSustains = splitAtBigChanges(analysis, findSustains(analysis))
   const foundPulses = findSoftPulses(analysis, rawSustains)
@@ -699,6 +703,19 @@ function hasOnsetNear(analysis: AudioAnalysis, frame: number): boolean {
   return false
 }
 
+/**
+ * Пауза в бите ещё не пауза в песне: в рэпе бит часто выпадает, а голос продолжает
+ * читать. Такую «паузу» не считаем, иначе ноты вырезались бы посреди читки.
+ */
+function withoutSpokenPauses(moments: Moment[], analysis: AudioAnalysis): Moment[] {
+  return moments.filter((moment) => {
+    if (moment.kind !== 'pause') return true
+    const length = Math.max(0.1, moment.end - moment.start)
+    const spoken = analysis.syllableTimes.filter((time) => time >= moment.start && time < moment.end).length
+    return spoken / length < PAUSE_SPEECH_RATE
+  })
+}
+
 /** Где уровень идёт за слогами: весь трек по голосу, в авто только быстрая читка, по ритму нигде. */
 function findReadingSpans(
   analysis: AudioAnalysis,
@@ -730,7 +747,11 @@ function pickSyllables(
   const lastTime = analysis.duration - TAIL_FRAMES / analysis.fps
   const picked: number[] = []
   let previous = -Infinity
-  for (const time of analysis.syllableTimes) {
+  // Внутри быстрой читки слоги ищем чувствительнее: в скороговорке подъёмы между ними малы
+  // Обычные слоги плюс найденные чувствительным порогом: дубли отсеет минимальный шаг ниже
+  const sensitive = findSyllables(analysis.speech, analysis.fps, READING_RISE_DB).syllableTimes
+  const syllableTimes = [...analysis.syllableTimes, ...sensitive].sort((a, b) => a - b)
+  for (const time of syllableTimes) {
     const isInside = time >= LEAD_IN_SEC && time <= lastTime && reading.some((span) => time >= span.start && time < span.end)
     if (!isInside || time - previous < difficulty.readingGapSec) continue
     picked.push(Math.round(time * analysis.fps))
