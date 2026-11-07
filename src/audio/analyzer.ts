@@ -71,6 +71,12 @@ export interface AudioAnalysis {
   vocalStrength: Float32Array
   /** Времена ударов в секундах. */
   onsetTimes: number[]
+  /**
+   * Удары в низах, до ~400 Гц: бочка и глухие гитарные «чаги». В тяжёлой музыке
+   * перегруженные гитары заливают весь спектр, и общий детектор их почти не слышит.
+   */
+  lowOnsets: Uint8Array
+  lowOnsetTimes: number[]
   /** 1 в момент удара, затем экспоненциально затухает к 0. Удобно для вспышек. */
   beatPulse: Float32Array
   /**
@@ -103,6 +109,8 @@ const VOCAL_HIGH_HZ = 3400
 const VOCAL_MIN_GAP_SEC = 0.12
 /** Насколько рост вне полосы голоса гасит рост в ней: так отсекаются удары. */
 const VOCAL_DRUM_PENALTY = 0.8
+/** Верх полосы, где ищутся удары в низах. */
+const LOW_ONSET_MAX_HZ = 400
 const SPEECH_OUTSIDE_SHARE = 0.5
 /** Быстрее 12 слогов в секунду не читает никто. */
 const SYLLABLE_MIN_GAP_SEC = 0.08
@@ -145,6 +153,7 @@ export function analyzeAudio(
   const mags = new Float32Array(half + 1)
   const prevSpectrumDb = new Float32Array(spectrumBins).fill(FLUX_FLOOR_DB)
   const isVocalBin = markVocalBins(spectrumBins, Math.min(16000, sampleRate / 2))
+  const isLowBin = markLowBins(spectrumBins, Math.min(16000, sampleRate / 2))
 
   const rawBass = new Float32Array(frameCount)
   const rawMid = new Float32Array(frameCount)
@@ -153,6 +162,7 @@ export function analyzeAudio(
   const flux = new Float32Array(frameCount)
   const vocalRise = new Float32Array(frameCount)
   const otherRise = new Float32Array(frameCount)
+  const lowFlux = new Float32Array(frameCount)
   const spectrumDb = new Float32Array(frameCount * spectrumBins)
 
   const bandRange = ([lo, hi]: [number, number]) =>
@@ -208,6 +218,7 @@ export function analyzeAudio(
         flux[f] += rise
         if (isVocalBin[b]) vocalRise[f] += rise
         else otherRise[f] += rise
+        if (isLowBin[b]) lowFlux[f] += rise
       }
       prevSpectrumDb[b] = db
     }
@@ -223,6 +234,7 @@ export function analyzeAudio(
   const rms = smoothEnvelope(normalize(rawRms), fps, opts.attack, opts.release)
 
   const { onsets, onsetTimes } = detectOnsets(flux, fps, opts.onset)
+  const { onsets: lowOnsets, onsetTimes: lowOnsetTimes } = detectOnsets(lowFlux, fps, opts.onset)
   const onsetStrength = normalize(flux, 1)
   const vocalFlux = vocalOnsetCurve(vocalRise, otherRise, isVocalBin)
   const vocalStrength = normalize(vocalFlux, 0.5)
@@ -260,6 +272,8 @@ export function analyzeAudio(
     vocalOnsets,
     vocalStrength,
     onsetTimes,
+    lowOnsets,
+    lowOnsetTimes,
     beatPulse,
     energyIntegral,
     spectrumBins,
@@ -402,6 +416,14 @@ function normalizeSpectrum(db: Float32Array): Float32Array {
     out[i] = Math.min(1, Math.max(0, (db[i] - bottom) / RANGE_DB))
   }
   return out
+}
+
+/** Какие столбики логарифмического спектра лежат в низах: бочка и гитарные чаги. */
+function markLowBins(bins: number, maxHz: number): boolean[] {
+  const marks: boolean[] = []
+  const ratio = maxHz / 30
+  for (let b = 0; b < bins; b++) marks.push(30 * Math.pow(ratio, (b + 0.5) / bins) <= LOW_ONSET_MAX_HZ)
+  return marks
 }
 
 /** Какие столбики логарифмического спектра попадают в полосу голоса. */

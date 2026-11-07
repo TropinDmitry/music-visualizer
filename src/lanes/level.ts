@@ -118,6 +118,8 @@ const BUILDUP_RUSH_GAP = 0.6
 const STAIRS = [0, 1, 2, 1]
 /** Шаг ритма делится на столько долей: на них встают и удары, и рисунок. */
 const STEP_SLOTS = 4
+/** Шаг длиннее этого делится вдвое мельче. */
+const LONG_STEP_SEC = 1.05
 const SHORT_STEP_SEC = 0.75
 /** С такой частоты слогов отрезок считается быстрой читкой. */
 const READING_MIN_RATE = 4.5
@@ -782,13 +784,14 @@ function arrangeRhythm(
     const isSoft = softChains.includes(chain)
     const steps: Set<number>[] = []
     for (let i = 0; i + 1 < chain.length; i++) {
-      const slotSec = (chain[i + 1] - chain[i]) / STEP_SLOTS
+      const slotCount = slotsInStep(chain[i + 1] - chain[i])
+      const slotSec = (chain[i + 1] - chain[i]) / slotCount
       const slots = new Set<number>()
       // Мелочь отбиваем только в мощной части, иначе спокойное начало сложнее припева
       const level = intensityAt(intensity, chain[i], fps)
       for (const frame of level < ACTIVE_LEVEL ? picked : heard) {
         const slot = Math.round((frame / fps - chain[i]) / slotSec)
-        if (slot >= 0 && slot < STEP_SLOTS) slots.add(slot)
+        if (slot >= 0 && slot < slotCount) slots.add(slot)
       }
       steps.push(slots)
     }
@@ -800,19 +803,22 @@ function arrangeRhythm(
     const canLadder = (step: number) => intensityAt(intensity, chain[step], fps) >= ACTIVE_LEVEL
     const ladderSteps = difficulty.isAdvanced ? chooseLadderSteps(steps, canLadder, difficulty.ladderPhraseSteps) : new Set<number>()
     for (let i = 0; i < steps.length; i++) {
-      const slotSec = (chain[i + 1] - chain[i]) / STEP_SLOTS
+      const slotCount = slotsInStep(chain[i + 1] - chain[i])
+      const slotSec = (chain[i + 1] - chain[i]) / slotCount
       const toFrame = (slot: number) => Math.round((chain[i] + slot * slotSec) * fps)
       beats.set(toFrame(0), chain[i + 1] - chain[i])
       if (ladderSteps.has(i)) {
-        for (let slot = 0; slot < STEP_SLOTS; slot++) ladder.push(toFrame(slot))
-        // Если музыка не кончилась, лесенка тянется до шести нот
+        // Средней сложности на длинном шаге лесенка идёт через долю: шестнадцатые для неё быстры
+        const stride = slotCount > STEP_SLOTS && difficulty.isEighthsOnly ? 2 : 1
+        for (let slot = 0; slot < slotCount; slot += stride) ladder.push(toFrame(slot))
+        // Если музыка не кончилась, лесенка тянется ещё на две ноты
         const isLong = difficulty.doubleHolds && i + 1 < steps.length && steps[i + 1].size >= LADDER_MIN_HITS
-        if (isLong && !ladderSteps.has(i + 1)) ladder.push(toFrame(STEP_SLOTS), toFrame(STEP_SLOTS + 1))
+        if (isLong && !ladderSteps.has(i + 1)) ladder.push(toFrame(slotCount), toFrame(slotCount + stride))
         continue
       }
       const isShort = chain[i + 1] - chain[i] < SHORT_STEP_SEC
       const isCalm = intensityAt(intensity, chain[i], fps) < CALM_LEVEL
-      for (const slot of chooseSlots(steps[i], difficulty, isSoft, isShort, isCalm)) {
+      for (const slot of chooseSlots(steps[i], slotCount, difficulty, isSoft, isShort, isCalm)) {
         frames.push(toFrame(slot))
         rhythmic.push(toFrame(slot))
       }
@@ -826,6 +832,15 @@ function arrangeRhythm(
   return { frames: unique, ladder, rhythmic, beats }
 }
 
+/**
+ * На сколько долей делится шаг ритма. Обычно на четыре, но если шаг найден длинным,
+ * как в тяжёлой музыке с половинным темпом, четыре доли дали бы восьмые вместо
+ * шестнадцатых, и быстрые чаги гитары некуда было бы поставить.
+ */
+function slotsInStep(step: number): number {
+  return step >= LONG_STEP_SEC ? STEP_SLOTS * 2 : STEP_SLOTS
+}
+
 function intensityAt(intensity: Float32Array, time: number, fps: number): number {
   return intensity[Math.min(Math.max(0, Math.round(time * fps)), intensity.length - 1)]
 }
@@ -834,7 +849,7 @@ function intensityAt(intensity: Float32Array, time: number, fps: number): number
 function allHeardFrames(analysis: AudioAnalysis, picked: number[]): number[] {
   const heard = [...picked]
   for (let frame = 0; frame < analysis.frameCount; frame++) {
-    if (analysis.onsets[frame] === 1) heard.push(frame)
+    if (analysis.onsets[frame] === 1 || analysis.lowOnsets[frame] === 1) heard.push(frame)
   }
   return heard
 }
@@ -860,6 +875,7 @@ function chooseLadderSteps(
 /** Обычный шаг: настоящие удары плюс опорные доли, чтобы рука не теряла ритм. */
 function chooseSlots(
   real: Set<number>,
+  slotCount: number,
   difficulty: Difficulty,
   isSoft: boolean,
   isShort: boolean,
@@ -867,15 +883,16 @@ function chooseSlots(
 ): Set<number> {
   // На коротком шаге все доли дали бы пять нажатий в секунду всю песню подряд
   const isCoarse = isShort || isCalm || difficulty.isEighthsOnly
-  const slots = new Set([...real].filter((slot) => !isCoarse || slot % 2 === 0))
+  const coarseStride = slotCount / 2
+  const slots = new Set([...real].filter((slot) => !isCoarse || slot % coarseStride === 0))
   // На мягком пульсе ударов почти не слышно, поэтому рисунок «тук, ту-тук» держит сам шаг
-  if (isSoft && !difficulty.isEighthsOnly) slots.add(STEP_SLOTS - 1)
+  if (isSoft && !difficulty.isEighthsOnly) slots.add(Math.round(slotCount * 0.75))
   // Спокойной части хватает опоры на начало шага: иначе она сложнее припева
   if (isCalm) {
     slots.add(0)
     return slots
   }
-  for (const share of difficulty.pulsePattern) slots.add(Math.round(share * STEP_SLOTS))
+  for (const share of difficulty.pulsePattern) slots.add(Math.round(share * slotCount))
   return slots
 }
 

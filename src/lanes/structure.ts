@@ -314,7 +314,9 @@ export function findSongParts(analysis: AudioAnalysis, sustains: Moment[], softP
     const end = Math.min(analysis.duration, start + PART_SEC)
     const isBusy = sustains.some((sustain) => sustain.start < end && sustain.end > start)
     const hasPulse = softPulses.some((time) => time >= start && time < end)
-    const peaks = analysis.onsetTimes.filter((time) => time >= start && time < end)
+    // Удары в низах держат темп в тяжёлой музыке, где общий детектор слышит мало
+    const all = [...analysis.onsetTimes, ...analysis.lowOnsetTimes].sort((a, b) => a - b)
+    const peaks = all.filter((time) => time >= start && time < end)
     const chain = isBusy || hasPulse ? [] : longestChain(peaks, RHYTHM_MIN_HITS)
 
     let hits = 0
