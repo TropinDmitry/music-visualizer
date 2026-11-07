@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { PALETTES, type Palette } from './palettes.ts'
+import { PALETTES, type HitStyle, type Palette } from './palettes.ts'
 import type { FrameFeatures } from '../audio/frameFeatures.ts'
 import { FULLSCREEN_VERTEX, NOISE_GLSL } from '../render/glsl.ts'
 import type { LaneNote } from './level.ts'
@@ -71,8 +71,16 @@ const MAX_SPACE_BARS = 4
 const SPACE_BAR_WIDTH = 2.7
 const SPACE_BAR_DEPTH = 0.62
 const SPACE_BURST_SEC = 0.75
-const MAX_SPARKS = 160
+const MAX_SPARKS = 240
 const SPARK_LIFETIME_SEC = 0.45
+/** Уголёк и лепесток живут дольше искры: они медленные и должны успеть стать заметными. */
+const EMBER_LIFETIME_SEC = 0.95
+const PETAL_LIFETIME_SEC = 1.25
+/** Уголёк остывает: из оранжевого через красный в пепел. */
+const EMBER_HOT = new THREE.Color('#ffb040')
+const EMBER_WARM = new THREE.Color('#e0300c')
+const EMBER_ASH = new THREE.Color('#3a2a24')
+const PETAL_COLORS = ['#ff5fae', '#ffd0e8', '#ffffff', '#c77dff']
 const MAX_SHOCKWAVES = 8
 const SHOCKWAVE_LIFETIME_SEC = 0.32
 
@@ -670,6 +678,10 @@ interface Spark {
   speedY: number
   bornAt: number
   color: THREE.Color
+  /** Искра летит дугой, уголёк поднимается и остывает, лепесток кружится и опадает. */
+  kind: HitStyle
+  /** Случайный сдвиг фазы покачивания и вращения: частицы не движутся строем. */
+  seed: number
 }
 
 /** Стрелка, которую отбили: летит в свою сторону, вращаясь и исчезая. */
@@ -758,6 +770,7 @@ export class LaneScene {
   private readonly noteShadows: THREE.InstancedMesh
   private readonly flyingArrows: FlyingArrow[] = []
   private readonly sparkMesh: THREE.InstancedMesh
+  private readonly petalMesh: THREE.InstancedMesh
   private readonly fanGroup = new THREE.Group()
   private readonly targets: Target[] = []
   private readonly sparks: Spark[] = []
@@ -885,11 +898,26 @@ export class LaneScene {
     this.sparkMesh.frustumCulled = false
     this.sparkMesh.renderOrder = 5
     this.sparkMesh.count = 0
+    // Лепесток: вытянутый овал, повёрнутый в полёте
+    const petalGeometry = new THREE.CircleGeometry(0.034, 14)
+    petalGeometry.scale(1, 0.5, 1)
+    // Лепестки без свечения: оно растворило бы их на светлом розовом фоне. Прозрачность
+    // включена только ради порядка отрисовки: иначе полупрозрачные дорожки легли бы сверху
+    this.petalMesh = new THREE.InstancedMesh(
+      petalGeometry,
+      new THREE.MeshBasicMaterial({ transparent: true, opacity: 1, depthTest: false }),
+      MAX_SPARKS,
+    )
+    this.petalMesh.frustumCulled = false
+    this.petalMesh.renderOrder = 5
+    this.petalMesh.count = 0
     for (let i = 0; i < MAX_SPARKS; i++) {
       this.sparkMesh.setColorAt(i, this.color.set('#ffffff'))
-      this.sparks.push({ x: 0, y: 0, speedX: 0, speedY: 0, bornAt: -Infinity, color: new THREE.Color() })
+      this.petalMesh.setColorAt(i, this.color.set('#ffffff'))
+      this.sparks.push({ x: 0, y: 0, speedX: 0, speedY: 0, bornAt: -Infinity, color: new THREE.Color(), kind: 'sparks', seed: 0 })
     }
     this.scene.add(this.sparkMesh)
+    this.scene.add(this.petalMesh)
 
     for (let i = 0; i < MAX_SHOCKWAVES; i++) {
       const mesh = new THREE.Mesh(
@@ -1142,23 +1170,62 @@ export class LaneScene {
     this.fanUniforms.uLaneGlow.value[lane] = 1
     this.targets[lane].squash = isPerfect ? 1.22 : 1.12
     this.targets[lane].light.opacity = 1
-    const color = isPerfect ? '#ffffff' : this.palette.tap
-    this.addShockwave(lane, color, clockTime)
+    const style = this.palette.hitStyle
+    // Волна от удара в характере палитры: у огня жаркая, у лепестков мягкая розовая
+    const waveColor = style === 'embers' ? '#ff8a1a' : style === 'petals' ? '#ffb3da' : this.palette.tap
+    this.addShockwave(lane, isPerfect && style === 'sparks' ? '#ffffff' : waveColor, clockTime)
     if (isPerfect) this.addShockwave(lane, this.palette.tap, clockTime - 0.08)
 
+    if (style === 'embers') this.burnNote(lane, isPerfect, clockTime)
+    else if (style === 'petals') this.scatterPetals(lane, isPerfect, clockTime)
+    else this.throwSparks(lane, isPerfect, clockTime)
+  }
+
+  private takeSpark(lane: number, clockTime: number, kind: HitStyle): Spark {
+    const spark = this.sparks[this.nextSpark]
+    this.nextSpark = (this.nextSpark + 1) % MAX_SPARKS
+    spark.x = this.laneX(lane)
+    spark.y = HIT_Y
+    spark.bornAt = clockTime
+    spark.kind = kind
+    spark.seed = Math.random() * Math.PI * 2
+    return spark
+  }
+
+  /** Искры летят веером вверх: к дорожке, а не в сторону счёта. */
+  private throwSparks(lane: number, isPerfect: boolean, clockTime: number): void {
     const count = isPerfect ? 14 : 8
     for (let i = 0; i < count; i++) {
-      const spark = this.sparks[this.nextSpark]
-      this.nextSpark = (this.nextSpark + 1) % MAX_SPARKS
-      // Искры летят веером вверх: к дорожке, а не в сторону счёта
+      const spark = this.takeSpark(lane, clockTime, 'sparks')
       const angle = Math.PI * (0.08 + 0.84 * Math.random())
       const speed = (isPerfect ? 1.5 : 1) * (0.5 + Math.random())
-      spark.x = this.laneX(lane)
-      spark.y = HIT_Y
       spark.speedX = Math.cos(angle) * speed
       spark.speedY = Math.sin(angle) * speed
-      spark.bornAt = clockTime
       spark.color.set(i % 3 === 0 ? '#ffffff' : this.palette.tap)
+    }
+  }
+
+  /** Нота сгорает: угольки медленно поднимаются над кнопкой, покачиваются и остывают в пепел. */
+  private burnNote(lane: number, isPerfect: boolean, clockTime: number): void {
+    const count = isPerfect ? 14 : 9
+    for (let i = 0; i < count; i++) {
+      const spark = this.takeSpark(lane, clockTime, 'embers')
+      spark.x += (Math.random() - 0.5) * 0.12
+      spark.speedX = (Math.random() - 0.5) * 0.25
+      spark.speedY = 0.2 + Math.random() * (isPerfect ? 0.45 : 0.3)
+    }
+  }
+
+  /** Нота рассыпается лепестками: они разлетаются, кружатся и плавно опадают. */
+  private scatterPetals(lane: number, isPerfect: boolean, clockTime: number): void {
+    const count = isPerfect ? 10 : 6
+    for (let i = 0; i < count; i++) {
+      const spark = this.takeSpark(lane, clockTime, 'petals')
+      const angle = Math.PI * (0.15 + 0.7 * Math.random())
+      const speed = 0.35 + Math.random() * (isPerfect ? 0.5 : 0.3)
+      spark.speedX = Math.cos(angle) * speed
+      spark.speedY = Math.sin(angle) * speed
+      spark.color.set(PETAL_COLORS[i % PETAL_COLORS.length])
     }
   }
 
@@ -1404,14 +1471,12 @@ export class LaneScene {
   private emitHoldSparks(holdingNotes: (LaneNote | null)[], clockTime: number): void {
     for (const note of holdingNotes) {
       if (!note) continue
-      const spark = this.sparks[this.nextSpark]
-      this.nextSpark = (this.nextSpark + 1) % MAX_SPARKS
+      // У огненного луча из кнопки поднимаются угольки, у остальных бьют искры
+      const isEmber = this.palette.hitStyle === 'embers'
+      const spark = this.takeSpark(note.lane, clockTime, isEmber ? 'embers' : 'sparks')
       const angle = Math.PI * (0.2 + 0.6 * Math.random())
-      spark.x = this.laneX(note.lane)
-      spark.y = HIT_Y
-      spark.speedX = Math.cos(angle) * 0.7
-      spark.speedY = Math.sin(angle) * 1.1
-      spark.bornAt = clockTime
+      spark.speedX = Math.cos(angle) * (isEmber ? 0.2 : 0.7)
+      spark.speedY = Math.sin(angle) * (isEmber ? 0.5 : 1.1)
       spark.color.set(this.palette.tap)
     }
   }
@@ -1435,11 +1500,56 @@ export class LaneScene {
 
   private updateSparks(clockTime: number): void {
     let count = 0
+    let petalCount = 0
     for (const spark of this.sparks) {
       const age = clockTime - spark.bornAt
+      // Положение считается по возрасту, поэтому не зависит от частоты кадров
+      if (spark.kind === 'petals') {
+        if (age >= PETAL_LIFETIME_SEC) continue
+        const life = 1 - age / PETAL_LIFETIME_SEC
+        // Лепесток быстро тормозит и потом опадает, покачиваясь из стороны в сторону
+        const drift = 1 - Math.exp(-age * 3)
+        this.helper.position.set(
+          spark.x + (spark.speedX / 3) * drift + 0.05 * Math.sin(age * 5 + spark.seed),
+          spark.y + (spark.speedY / 3) * drift - 0.22 * age * age,
+          0,
+        )
+        this.helper.rotation.set(0, 0, spark.seed + age * 4)
+        // Кружение видно как сжатие по одной оси, а исчезает лепесток, уменьшаясь
+        const turn = 0.55 + 0.45 * Math.abs(Math.sin(age * 6 + spark.seed))
+        const fade = Math.min(1, life * 4)
+        this.helper.scale.set(fade, fade * turn, 1)
+        this.helper.updateMatrix()
+        this.petalMesh.setMatrixAt(petalCount, this.helper.matrix)
+        this.petalMesh.setColorAt(petalCount, this.color.copy(spark.color))
+        petalCount += 1
+        continue
+      }
+
+      if (spark.kind === 'embers') {
+        if (age >= EMBER_LIFETIME_SEC) continue
+        const heat = 1 - age / EMBER_LIFETIME_SEC
+        // Уголёк поднимается всё быстрее, как в потоке горячего воздуха, и дрожит
+        this.helper.position.set(
+          spark.x + spark.speedX * age + 0.025 * Math.sin(age * 14 + spark.seed),
+          spark.y + spark.speedY * age + 0.25 * age * age,
+          0,
+        )
+        this.helper.rotation.set(0, 0, 0)
+        this.helper.scale.setScalar(0.6 + 0.9 * heat)
+        this.helper.updateMatrix()
+        if (heat > 0.5) this.color.copy(EMBER_WARM).lerp(EMBER_HOT, (heat - 0.5) * 2)
+        else this.color.copy(EMBER_ASH).lerp(EMBER_WARM, heat * 2)
+        // Мерцание: уголёк то вспыхивает, то притухает
+        const flicker = 0.75 + 0.25 * Math.sin(age * 30 + spark.seed * 3)
+        this.sparkMesh.setMatrixAt(count, this.helper.matrix)
+        this.sparkMesh.setColorAt(count, this.color.multiplyScalar(flicker * Math.min(1, heat * 2)))
+        count += 1
+        continue
+      }
+
       if (age >= SPARK_LIFETIME_SEC) continue
       const life = 1 - age / SPARK_LIFETIME_SEC
-      // Положение считается по возрасту, поэтому не зависит от частоты кадров
       this.helper.position.set(
         spark.x + spark.speedX * age,
         spark.y + spark.speedY * age - 0.8 * age * age,
@@ -1455,6 +1565,9 @@ export class LaneScene {
     this.sparkMesh.count = count
     this.sparkMesh.instanceMatrix.needsUpdate = true
     if (this.sparkMesh.instanceColor) this.sparkMesh.instanceColor.needsUpdate = true
+    this.petalMesh.count = petalCount
+    this.petalMesh.instanceMatrix.needsUpdate = true
+    if (this.petalMesh.instanceColor) this.petalMesh.instanceColor.needsUpdate = true
   }
 
   private updateShockwaves(clockTime: number): void {

@@ -110,13 +110,18 @@
   border-color: #ff5c6c;
 }
 
-/* Чем выше множитель, тем крупнее цифра, сильнее свечение и резче появление */
 .pill-main {
-  font-size: calc(24px + var(--level) * 3px);
+  font-size: 28px;
   font-weight: 800;
   line-height: 1;
   color: #ffffff;
   font-variant-numeric: tabular-nums;
+}
+
+/* Множитель: чем выше, тем крупнее цифра, сильнее свечение и резче появление.
+   Только слева: проценты справа от множителя не зависят */
+.side-left .pill-main {
+  font-size: calc(24px + var(--level) * 3px);
   text-shadow: 0 0 calc(var(--level) * 3px) var(--tier);
   animation: multiplier-pop 0.45s cubic-bezier(0.2, 1.6, 0.4, 1);
 }
@@ -129,15 +134,15 @@
 }
 
 /* С ×5 цифра дышит, на ×8 горит постоянно */
-.tier-5 .pill-main,
-.tier-6 .pill-main,
-.tier-7 .pill-main {
+.tier-5 .side-left .pill-main,
+.tier-6 .side-left .pill-main,
+.tier-7 .side-left .pill-main {
   animation:
     multiplier-pop 0.45s cubic-bezier(0.2, 1.6, 0.4, 1),
     multiplier-glow 1.2s ease-in-out 0.45s infinite;
 }
 
-.tier-8 .pill-main {
+.tier-8 .side-left .pill-main {
   color: var(--tier);
   animation:
     multiplier-pop 0.45s cubic-bezier(0.2, 1.6, 0.4, 1),
@@ -376,6 +381,11 @@
 
   .pill-main {
     font-size: 22px;
+  }
+
+  /* Панель на телефоне узкая: множитель растёт меньше */
+  .side-left .pill-main {
+    font-size: calc(18px + var(--level) * 2px);
   }
 }
 

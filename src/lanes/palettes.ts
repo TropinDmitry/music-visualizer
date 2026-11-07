@@ -8,6 +8,7 @@ import type { AudioAnalysis } from '../audio/analyzer.ts'
 
 export type PaletteId = 'neon' | 'fire' | 'dark' | 'pink'
 export type PaletteChoice = PaletteId | 'auto'
+export type HitStyle = 'sparks' | 'embers' | 'petals'
 
 export interface Palette {
   id: PaletteId
@@ -42,6 +43,8 @@ export interface Palette {
   /** Цвет лучей удержания. В Огне луч горит языками пламени. */
   beam: [number, number, number]
   isFlameBeam: boolean
+  /** Чем рассыпается нота при попадании: искры, тлеющие угольки или лепестки. */
+  hitStyle: HitStyle
   /** Цвет звёзд-нот. */
   special: string
   /** Каждая какая обычная нота белая, как центр чашки. 0 — белых нет. */
@@ -72,6 +75,7 @@ export const PALETTES: Record<PaletteId, Palette> = {
     crown: [0.62, 0.28, 1],
     beam: [0.72, 0.3, 1],
     isFlameBeam: false,
+    hitStyle: 'sparks',
     special: '#ffc933',
     whiteNoteEvery: 0,
     allowsDrift: true,
@@ -97,6 +101,7 @@ export const PALETTES: Record<PaletteId, Palette> = {
     crown: [1, 0.3, 0.08],
     beam: [1, 0.4, 0.05],
     isFlameBeam: true,
+    hitStyle: 'embers',
     special: '#ffc933',
     whiteNoteEvery: 0,
     allowsDrift: false,
@@ -122,6 +127,7 @@ export const PALETTES: Record<PaletteId, Palette> = {
     crown: [0.4, 0.4, 0.5],
     beam: [0.82, 0.84, 0.92],
     isFlameBeam: false,
+    hitStyle: 'sparks',
     special: '#e8ecf2',
     whiteNoteEvery: 3,
     allowsDrift: false,
@@ -147,6 +153,7 @@ export const PALETTES: Record<PaletteId, Palette> = {
     crown: [1, 0.4, 0.8],
     beam: [1, 0.45, 0.8],
     isFlameBeam: false,
+    hitStyle: 'petals',
     special: '#ffc933',
     whiteNoteEvery: 0,
     allowsDrift: false,
