@@ -4,6 +4,14 @@ import type { Difficulty, LaneNote, NoteKind } from './level.ts'
 
 export const PERFECT_WINDOW_SEC = 0.05
 export const GOOD_WINDOW_SEC = 0.12
+/**
+ * Стрелку нельзя отбить, пока она не коснулась чаши: раньше засчитывался взмах
+ * по стрелке, которая ещё летела. Зато она задерживается на чаше: смахивание на
+ * телефоне занимает время, и палец не должен гнаться за пролетающей нотой.
+ */
+export const SWIPE_EARLY_SEC = 0.04
+export const SWIPE_LATE_SEC = 0.3
+const SWIPE_PERFECT_LATE_SEC = 0.12
 /** Со скольких промахов подряд игрока предупреждают. */
 export const MISS_WARNING_STREAK = 3
 
@@ -102,14 +110,36 @@ export function createLaneGame(notes: LaneNote[], difficulty: Difficulty): LaneG
   }
 }
 
+/** Насколько раньше своего времени ноту можно нажать. */
+function earlyWindow(note: LaneNote): number {
+  return note.kind === 'swipe' ? SWIPE_EARLY_SEC : GOOD_WINDOW_SEC
+}
+
+/** Насколько позже своего времени нота ещё ждёт нажатия. */
+export function lateWindow(note: LaneNote): number {
+  return note.kind === 'swipe' ? SWIPE_LATE_SEC : GOOD_WINDOW_SEC
+}
+
+/** Есть ли сейчас пробел, который можно нажать. На телефоне тогда любое касание идёт в пробел. */
+export function isSpaceDue(game: LaneGame, time: number): boolean {
+  for (let i = game.firstNote; i < game.notes.length; i++) {
+    const note = game.notes[i]
+    if (note.time - time > GOOD_WINDOW_SEC) break
+    if (note.kind === 'space' && !game.judged.has(note.id) && time - note.time <= GOOD_WINDOW_SEC) return true
+  }
+  return false
+}
+
 /** Отмечает пропущенные ноты. Вызывается каждый кадр. */
 export function stepLanes(game: LaneGame, time: number): LaneEvent[] {
   const events: LaneEvent[] = []
 
-  while (game.firstNote < game.notes.length) {
-    const note = game.notes[game.firstNote]
+  // Стрелка ждёт дольше других нот, поэтому идём дальше неё, а не останавливаемся на ней
+  for (let i = game.firstNote; i < game.notes.length; i++) {
+    const note = game.notes[i]
+    if (note.time + GOOD_WINDOW_SEC >= time) break
     if (!game.judged.has(note.id)) {
-      if (time <= note.time + GOOD_WINDOW_SEC) break
+      if (time <= note.time + lateWindow(note)) continue
       game.judged.add(note.id)
       game.combo = 0
       game.misses += 1
@@ -126,8 +156,8 @@ export function stepLanes(game: LaneGame, time: number): LaneEvent[] {
         noteTime: note.time,
       })
     }
-    game.firstNote += 1
   }
+  while (game.firstNote < game.notes.length && game.judged.has(game.notes[game.firstNote].id)) game.firstNote += 1
 
   for (let lane = 0; lane < game.holds.length; lane++) {
     const hold = game.holds[lane]
@@ -215,8 +245,10 @@ function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => bo
     const note = game.notes[i]
     if (note.time - time > GOOD_WINDOW_SEC) break
     if (game.judged.has(note.id) || !fits(note)) continue
-    const error = Math.abs(note.time - time)
-    if (error <= GOOD_WINDOW_SEC && error < nearestError) {
+    const late = time - note.time
+    if (late < -earlyWindow(note) || late > lateWindow(note)) continue
+    const error = Math.abs(late)
+    if (error < nearestError) {
       nearest = note
       nearestError = error
     }
@@ -225,7 +257,9 @@ function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => bo
   if (!nearest) return null
   game.judged.add(nearest.id)
   if (nearest.kind === 'hold') game.holds[nearest.lane] = { note: nearest, scoredUntil: nearest.time }
-  const isPerfect = nearestError <= PERFECT_WINDOW_SEC
+  // У стрелки точное попадание с момента касания чаши и пока она на ней тормозит
+  const late = time - nearest.time
+  const isPerfect = nearest.kind === 'swipe' ? late <= SWIPE_PERFECT_LATE_SEC : nearestError <= PERFECT_WINDOW_SEC
   const isSpecial = nearest.kind === 'star' || nearest.kind === 'accent' || nearest.kind === 'space'
   const overdriveBonus = isOverdrive(game, nearest.time) ? OVERDRIVE_BONUS : 1
   const bonus = isSpecial ? STAR_BONUS : nearest.kind === 'swipe' ? ARROW_BONUS : 1

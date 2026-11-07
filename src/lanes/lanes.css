@@ -866,3 +866,10 @@ input[type='checkbox'] {
     display: none;
   }
 }
+
+/* Safari на айфоне иначе выделяет текст и открывает меню при долгом касании дорожки */
+.game {
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}

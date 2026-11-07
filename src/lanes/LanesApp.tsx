@@ -23,6 +23,7 @@ import {
   accuracy,
   createLaneGame,
   isOverdrive,
+  isSpaceDue,
   MISS_WARNING_STREAK,
   multiplier,
   multiplierProgress,
@@ -134,7 +135,7 @@ const VIDEO_MAX_DRIFT_SEC = 0.15
 const LOW_ENERGY = 0.3
 /** Цвет дорожек по силе части песни: тихое холоднее, мощное теплее. */
 /** Сдвиг пальца, после которого касание считается смахиванием. */
-const SWIPE_MIN_PX = 35
+const SWIPE_MIN_PX = 28
 /** Какая доля экрана сверху на телефоне работает как пробел. */
 const SPACE_TOUCH_ZONE = 0.5
 /** На сколько радиан поворачивается оттенок клипа от начала песни до конца. */
@@ -629,8 +630,13 @@ export function LanesApp() {
     const scene = sceneRef.current
     if (!canvas || !scene || screen !== 'playing') return
     const box = canvas.getBoundingClientRect()
-    // На телефоне нет пробела: длинную ноту нажимают касанием верхней части экрана
-    if (event.pointerType === 'touch' && event.clientY - box.top < box.height * SPACE_TOUCH_ZONE) {
+    // На телефоне нет пробела: длинную ноту нажимают касанием верха экрана, а когда
+    // она на линии, засчитывается касание в любом месте. Иначе палец ложится на саму
+    // плашку SPACE у чаш, и это уходило в дорожку
+    const time = playingTime()
+    const isSpaceNow = time !== null && gameRef.current !== null && isSpaceDue(gameRef.current, time)
+    const isTopZone = event.clientY - box.top < box.height * SPACE_TOUCH_ZONE
+    if (event.pointerType === 'touch' && (isTopZone || isSpaceNow)) {
       handlersRef.current.space()
       return
     }

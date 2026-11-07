@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { PALETTES, type HitStyle, type Palette } from './palettes.ts'
+import { SWIPE_LATE_SEC } from './rules.ts'
 import type { FrameFeatures } from '../audio/frameFeatures.ts'
 import { FULLSCREEN_VERTEX, NOISE_GLSL } from '../render/glsl.ts'
 import type { LaneNote } from './level.ts'
@@ -88,6 +89,13 @@ const GLITTER_LIFETIME_SEC = 1.15
 const GLINT_LIFETIME_SEC = 0.5
 const MAX_SHOCKWAVES = 8
 const SHOCKWAVE_LIFETIME_SEC = 0.32
+/**
+ * Стрелка тормозит на подлёте и замирает на краю чаши. Дальше её закрыл бы передний
+ * край чаши, а у самой чаши перспектива так растянута, что занос уносит ноту за экран.
+ * Числа в секундах пути: где начинается торможение и где стрелка встаёт.
+ */
+const ARROW_BRAKE_FROM_SEC = 0.04
+const ARROW_REST_SEC = 0.008
 
 const clipFragment = /* glsl */ `
   ${NOISE_GLSL}
@@ -1392,12 +1400,16 @@ export class LaneScene {
       if (remaining > approachSec) break
       if (judged.has(note.id)) continue
 
-      const closeness = this.closenessAt(remaining, approachSec)
+      const isArrow = note.kind === 'swipe'
+      // Стрелка не пролетает чашу: доходит до неё и тормозит, пока её ещё можно отбить
+      const closeness = this.closenessAt(isArrow ? arrowRemaining(remaining) : remaining, approachSec)
       const spacing = this.spacingAt(closeness)
       const x = (note.lane - 1) * spacing
       const y = VANISH_Y + (HIT_Y - VANISH_Y) * closeness
-      // Размер зависит от расстояния между дорожками, поэтому в узком окне ноты меньше
-      const size = NOTE_SIZE * (spacing / LANE_SPREAD)
+      // Размер зависит от расстояния между дорожками, поэтому в узком окне ноты меньше.
+      // Залежавшаяся на чаше стрелка к концу своего окна чуть сжимается: скоро исчезнет
+      const fading = isArrow ? Math.min(1, Math.max(0, (-remaining - SWIPE_LATE_SEC * 0.6) / (SWIPE_LATE_SEC * 0.4))) : 0
+      const size = NOTE_SIZE * (spacing / LANE_SPREAD) * (1 - 0.3 * fading)
 
       if (note.kind === 'space') {
         if (spaceCount < MAX_SPACE_BARS) {
@@ -1718,4 +1730,15 @@ function createGlintGeometry(): THREE.ShapeGeometry {
     else shape.lineTo(x, y)
   }
   return new THREE.ShapeGeometry(shape)
+}
+
+/**
+ * Сколько пути осталось стрелке: до торможения как у всех нот, потом она плавно
+ * подходит к краю чаши и стоит там. Скорость на стыке не скачет: экспонента начинает
+ * с той же скорости, что и равномерный полёт.
+ */
+function arrowRemaining(remaining: number): number {
+  if (remaining >= ARROW_BRAKE_FROM_SEC) return remaining
+  const brake = ARROW_BRAKE_FROM_SEC - ARROW_REST_SEC
+  return ARROW_REST_SEC + brake * Math.exp((remaining - ARROW_BRAKE_FROM_SEC) / brake)
 }

@@ -10,6 +10,8 @@ import {
   accuracy,
   createLaneGame,
   GOOD_WINDOW_SEC,
+  SWIPE_EARLY_SEC,
+  SWIPE_LATE_SEC,
   MISS_WARNING_STREAK,
   multiplierProgress,
   playAutopilot,
@@ -616,14 +618,23 @@ describe('правила', () => {
   it('свайп проверяет направление', () => {
     const game = createLaneGame(level, easy)
     expect(pressSwipe(game, 2, -1)).toBeNull()
-    expect(pressSwipe(game, 2 + GOOD_WINDOW_SEC - 0.01, 1)?.type).toBe('good')
+    expect(pressSwipe(game, 2 + SWIPE_LATE_SEC - 0.01, 1)?.type).toBe('good')
+  })
+
+  it('стрелку нельзя отбить до касания чаши, но она ждёт на чаше', () => {
+    const early = createLaneGame(level, easy)
+    expect(pressSwipe(early, 2 - SWIPE_EARLY_SEC - 0.02, 1)).toBeNull()
+    const lingering = createLaneGame(level, easy)
+    expect(pressSwipe(lingering, 2 + 0.1, 1)?.type).toBe('perfect')
   })
 
   it('пропущенная нота — промах и сброс комбо', () => {
     const game = createLaneGame(level, easy)
     pressLane(game, 1, 0)
     expect(game.combo).toBe(1)
-    const events = stepLanes(game, 2 + GOOD_WINDOW_SEC + 0.01)
+    // Под второй нотой стрелка: она ждёт на чаше дольше обычной ноты
+    expect(stepLanes(game, 2 + GOOD_WINDOW_SEC + 0.01)).toEqual([])
+    const events = stepLanes(game, 2 + SWIPE_LATE_SEC + 0.01)
     expect(events.map((event) => event.type)).toEqual(['miss'])
     expect(game.combo).toBe(0)
   })
