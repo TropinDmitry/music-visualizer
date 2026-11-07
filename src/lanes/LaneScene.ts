@@ -60,13 +60,13 @@ const PLANE_SQUASH = Math.sin(NOTE_TILT)
  * Стрелка длиннее круга и выходит за его край с обеих сторон: силуэт уже не круглый,
  * и его узнаёшь боковым зрением, даже среди белых нот.
  */
-const ARROW_IN_COIN = 1
+const ARROW_IN_COIN = 0.74
 /** Круг сжат наклоном, поэтому стрелке вверх нужна длина, а боковым нет. */
-const UP_ARROW_LENGTH = 1.25
+const UP_ARROW_LENGTH = 0.95
 const UP_ARROW_WIDTH = 1.05
 /** Под стрелкой тёмная монета с кольцом: все ноты светлые, а эта наоборот. */
 const COIN_WITH_ARROW_COLOR = '#151a22'
-const COIN_UNDER_ARROW = 0.86
+const COIN_UNDER_ARROW = 0.92
 const ARROW_ON_COIN_COLOR = '#ffffff'
 const FLYING_ARROW_COLOR = '#ffffff'
 /** Золотая обводка звезды, если сама звезда в палитре светлая и сливается с белыми нотами. */
