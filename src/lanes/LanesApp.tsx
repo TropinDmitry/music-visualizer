@@ -214,6 +214,34 @@ function isFlawless(result: GameResult): boolean {
   return !result.failed && result.misses === 0 && result.stars === 3
 }
 
+/** Ползунок настройки с подписью и текущим значением справа. */
+function Slider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  shown,
+  onChange,
+}: {
+  label: string
+  value: number
+  min: number
+  max: number
+  step: number
+  shown: string
+  onChange: (value: number) => void
+}) {
+  return (
+    <label className="slider">
+      <span>
+        {label} <output>{shown}</output>
+      </span>
+      <input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} />
+    </label>
+  )
+}
+
 export function LanesApp() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -236,6 +264,9 @@ export function LanesApp() {
   const [lang, setLang] = useState<Lang>(detectLang)
   const [isMusicMuted, setMusicMuted] = useState(loadMusicMuted)
   const [isSplashReady, setSplashReady] = useState(false)
+  /** Меню разбито на страницы: на главной только то, что нужно перед каждой партией. */
+  const [menuPage, setMenuPage] = useState<'main' | 'settings' | 'help'>('main')
+  const [settingsTab, setSettingsTab] = useState<'look' | 'game'>('look')
   const text = TEXTS[lang]
   const [analysis, setAnalysis] = useState<AudioAnalysis | null>(null)
   const [trackName, setTrackName] = useState('')
@@ -914,42 +945,33 @@ export function LanesApp() {
         </div>
       )}
 
-      {screen === 'menu' && (
-        <main className="menu">
+      {screen === 'menu' && menuPage === 'main' && (
+        <main className="menu menu-main">
           <header>
             <Logo className="menu-logo" />
             <h1 className="wordmark">TAP YOUR TRACK</h1>
             <p>{text.tagline}</p>
           </header>
 
-          <section className="menu-card">
-            <h2>{text.trackAndClip}</h2>
-            <label className="file-button">
-              <input
-                type="file"
-                accept="audio/*,video/*,.mp3,.wav,.ogg,.mp4,.webm"
-                data-testid="track-input"
-                onChange={(event) => {
-                  const file = event.target.files?.[0]
-                  if (file) void handleTrackFile(file)
-                  event.target.value = ''
-                }}
-              />
-              {text.loadTrack}
-            </label>
-            <label className="file-button is-secondary">
-              <input
-                type="file"
-                accept="video/*,.mp4,.webm"
-                data-testid="clip-input"
-                onChange={(event) => {
-                  const file = event.target.files?.[0]
-                  if (file) attachClip(file)
-                  event.target.value = ''
-                }}
-              />
-              {text.addClip}
-            </label>
+          <label className="big-button file-button">
+            <input
+              type="file"
+              accept="audio/*,video/*,.mp3,.wav,.ogg,.mp4,.webm"
+              data-testid="track-input"
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                if (file) void handleTrackFile(file)
+                event.target.value = ''
+              }}
+            />
+            <strong>{trackName ? text.changeTrack : text.loadTrackShort}</strong>
+            <small>{text.loadTrackHint}</small>
+          </label>
+          <p className="track-name" data-testid="track-status">
+            {status || trackName || text.privacy}
+            {clipName && !status ? ` · ${text.clip}: ${clipName}` : ''}
+          </p>
+          {!trackName && !status && (
             <button
               className="text-button"
               onClick={() => {
@@ -959,171 +981,206 @@ export function LanesApp() {
             >
               {text.demoTrack}
             </button>
-            <p className="track-name" data-testid="track-status">
-              {status || trackName || text.privacy}
-              {clipName && !status ? ` · ${text.clip}: ${clipName}` : ''}
-            </p>
-          </section>
+          )}
 
-          <section className="menu-card">
-            <h2>{text.settings}</h2>
-            <div className="segmented">
-              {DIFFICULTIES.map((difficulty) => (
-                <button
-                  key={difficulty.id}
-                  className={difficulty.id === settings.difficulty ? 'is-active' : ''}
-                  onClick={() => update({ difficulty: difficulty.id })}
-                >
-                  {text.difficulties[difficulty.id]}
-                </button>
-              ))}
-            </div>
-            <div className="segmented palette-list" aria-label={text.paletteLabel}>
-              {PALETTE_CHOICES.map((choice) => (
-                <button
-                  key={choice.id}
-                  className={choice.id === settings.palette ? 'is-active' : ''}
-                  onClick={() => update({ palette: choice.id })}
-                >
-                  {choice.id !== 'auto' && <i className="swatch" style={{ background: PALETTES[choice.id].normal }} />}
-                  {text.palettes[choice.id]}
-                </button>
-              ))}
-            </div>
-            <p className="focus-hint">
-              {settings.palette === 'auto'
-                ? guessedPalette
-                  ? text.paletteGuessed(text.palettes[guessedPalette])
-                  : text.paletteWaiting
-                : text.paletteManual}
-            </p>
-            <div className="segmented look-list">
-              {CLIP_LOOKS.map((look) => (
-                <button
-                  key={look.id}
-                  className={look.id === settings.look ? 'is-active' : ''}
-                  onClick={() => update({ look: look.id })}
-                >
-                  {text.looks[look.id]}
-                </button>
-              ))}
-            </div>
-            <label className="slider">
-              <span>
-                {text.clipBrightness} <output>{Math.round(settings.clipBrightness * 100)}%</output>
-              </span>
-              <input
-                type="range"
-                min={0.2}
-                max={1}
-                step={0.05}
-                value={settings.clipBrightness}
-                onChange={(event) => update({ clipBrightness: Number(event.target.value) })}
-              />
-            </label>
-            <label className="slider">
-              <span>
-                {text.clipFocus} <output>{Math.round(settings.clipFocus * 100)}%</output>
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={settings.clipFocus}
-                onChange={(event) => update({ clipFocus: Number(event.target.value) })}
-              />
-            </label>
-            <label className="slider">
-              <span>
-                {text.laneContrast} <output>{Math.round(settings.laneContrast * 100)}%</output>
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={settings.laneContrast}
-                onChange={(event) => update({ laneContrast: Number(event.target.value) })}
-              />
-            </label>
-            <label className="slider">
-              <span>
-                {text.noteSpeed} <output>{settings.approachSec.toFixed(1)} {text.seconds}</output>
-              </span>
-              <input
-                type="range"
-                min={0.8}
-                max={2.6}
-                step={0.1}
-                value={settings.approachSec}
-                onChange={(event) => update({ approachSec: Number(event.target.value) })}
-              />
-            </label>
-            <label className="slider">
-              <span>
-                {text.volume} <output>{Math.round(settings.volume * 100)}%</output>
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={settings.volume}
-                onChange={(event) => update({ volume: Number(event.target.value) })}
-              />
-            </label>
-            <label className="slider">
-              <span>
-                {text.effects} <output>{Math.round(settings.effectsVolume * 100)}%</output>
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={settings.effectsVolume}
-                onChange={(event) => update({ effectsVolume: Number(event.target.value) })}
-              />
-            </label>
-            <label className="slider">
-              <span>
-                {text.offset} <output>{settings.offsetMs} {text.ms}</output>
-              </span>
-              <input
-                type="range"
-                min={-200}
-                max={200}
-                step={10}
-                value={settings.offsetMs}
-                onChange={(event) => update({ offsetMs: Number(event.target.value) })}
-              />
-            </label>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                data-testid="color-drift"
-                checked={settings.colorDrift}
-                onChange={(event) => update({ colorDrift: event.target.checked })}
-              />
-              {text.colorDrift}
-            </label>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                data-testid="autopilot"
-                checked={settings.autopilot}
-                onChange={(event) => update({ autopilot: event.target.checked })}
-              />
-              {text.autopilot}
-            </label>
-          </section>
+          <div className="segmented difficulty-list" role="group" aria-label={text.difficulty}>
+            {DIFFICULTIES.map((difficulty) => (
+              <button
+                key={difficulty.id}
+                className={difficulty.id === settings.difficulty ? 'is-active' : ''}
+                onClick={() => update({ difficulty: difficulty.id })}
+              >
+                {text.difficulties[difficulty.id]}
+              </button>
+            ))}
+          </div>
 
           <button className="start-button" disabled={!analysis} onClick={startGame}>
             {text.start}
           </button>
 
-          <ul className="legend">
+          <nav className="menu-links">
+            <button className="nav-button" onClick={() => setMenuPage('settings')}>
+              {text.settings}
+            </button>
+            <button className="nav-button" onClick={() => setMenuPage('help')}>
+              {text.howToPlay}
+            </button>
+          </nav>
+        </main>
+      )}
+
+      {screen === 'menu' && menuPage === 'settings' && (
+        <main className="menu menu-page">
+          <div className="page-head">
+            <button className="back-button" onClick={() => setMenuPage('main')}>
+              ← {text.back}
+            </button>
+            <h2>{text.settings}</h2>
+          </div>
+
+          <div className="tabs" role="tablist">
+            {(['look', 'game'] as const).map((tab) => (
+              <button
+                key={tab}
+                role="tab"
+                aria-selected={settingsTab === tab}
+                className={settingsTab === tab ? 'is-active' : ''}
+                onClick={() => setSettingsTab(tab)}
+              >
+                {tab === 'look' ? text.tabLook : text.tabGame}
+              </button>
+            ))}
+          </div>
+
+          {settingsTab === 'look' && (
+            <section className="menu-card">
+              <h3>{text.paletteLabel}</h3>
+              <div className="segmented palette-list" aria-label={text.paletteLabel}>
+                {PALETTE_CHOICES.map((choice) => (
+                  <button
+                    key={choice.id}
+                    className={choice.id === settings.palette ? 'is-active' : ''}
+                    onClick={() => update({ palette: choice.id })}
+                  >
+                    {choice.id !== 'auto' && <i className="swatch" style={{ background: PALETTES[choice.id].normal }} />}
+                    {text.palettes[choice.id]}
+                  </button>
+                ))}
+              </div>
+              <p className="focus-hint">
+                {settings.palette === 'auto'
+                  ? guessedPalette
+                    ? text.paletteGuessed(text.palettes[guessedPalette])
+                    : text.paletteWaiting
+                  : text.paletteManual}
+              </p>
+
+              <h3>{text.clipLook}</h3>
+              <div className="segmented look-list">
+                {CLIP_LOOKS.map((look) => (
+                  <button
+                    key={look.id}
+                    className={look.id === settings.look ? 'is-active' : ''}
+                    onClick={() => update({ look: look.id })}
+                  >
+                    {text.looks[look.id]}
+                  </button>
+                ))}
+              </div>
+              <label className="file-button is-secondary">
+                <input
+                  type="file"
+                  accept="video/*,.mp4,.webm"
+                  data-testid="clip-input"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0]
+                    if (file) attachClip(file)
+                    event.target.value = ''
+                  }}
+                />
+                {text.addClip}
+              </label>
+              <Slider
+                label={text.clipBrightness}
+                value={settings.clipBrightness}
+                min={0.2}
+                max={1}
+                step={0.05}
+                shown={`${Math.round(settings.clipBrightness * 100)}%`}
+                onChange={(clipBrightness) => update({ clipBrightness })}
+              />
+              <Slider
+                label={text.clipFocus}
+                value={settings.clipFocus}
+                min={0}
+                max={1}
+                step={0.05}
+                shown={`${Math.round(settings.clipFocus * 100)}%`}
+                onChange={(clipFocus) => update({ clipFocus })}
+              />
+              <Slider
+                label={text.laneContrast}
+                value={settings.laneContrast}
+                min={0}
+                max={1}
+                step={0.05}
+                shown={`${Math.round(settings.laneContrast * 100)}%`}
+                onChange={(laneContrast) => update({ laneContrast })}
+              />
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  data-testid="color-drift"
+                  checked={settings.colorDrift}
+                  onChange={(event) => update({ colorDrift: event.target.checked })}
+                />
+                {text.colorDrift}
+              </label>
+            </section>
+          )}
+
+          {settingsTab === 'game' && (
+            <section className="menu-card">
+              <Slider
+                label={text.noteSpeed}
+                value={settings.approachSec}
+                min={0.8}
+                max={2.6}
+                step={0.1}
+                shown={`${settings.approachSec.toFixed(1)} ${text.seconds}`}
+                onChange={(approachSec) => update({ approachSec })}
+              />
+              <Slider
+                label={text.volume}
+                value={settings.volume}
+                min={0}
+                max={1}
+                step={0.05}
+                shown={`${Math.round(settings.volume * 100)}%`}
+                onChange={(volume) => update({ volume })}
+              />
+              <Slider
+                label={text.effects}
+                value={settings.effectsVolume}
+                min={0}
+                max={1}
+                step={0.05}
+                shown={`${Math.round(settings.effectsVolume * 100)}%`}
+                onChange={(effectsVolume) => update({ effectsVolume })}
+              />
+              <Slider
+                label={text.offset}
+                value={settings.offsetMs}
+                min={-200}
+                max={200}
+                step={10}
+                shown={`${settings.offsetMs} ${text.ms}`}
+                onChange={(offsetMs) => update({ offsetMs })}
+              />
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  data-testid="autopilot"
+                  checked={settings.autopilot}
+                  onChange={(event) => update({ autopilot: event.target.checked })}
+                />
+                {text.autopilot}
+              </label>
+            </section>
+          )}
+        </main>
+      )}
+
+      {screen === 'menu' && menuPage === 'help' && (
+        <main className="menu menu-page">
+          <div className="page-head">
+            <button className="back-button" onClick={() => setMenuPage('main')}>
+              ← {text.back}
+            </button>
+            <h2>{text.howToPlay}</h2>
+          </div>
+          <ul className="menu-card legend">
             {text.legend.map((line) => (
               <li key={line}>{line}</li>
             ))}
