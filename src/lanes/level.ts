@@ -545,7 +545,8 @@ function addSustainHolds(notes: LaneNote[], difficulty: Difficulty, sustains: Mo
     const startsEarlier = previous !== null && silence >= SUSTAIN_LATE_SEC && silence <= SUSTAIN_STRETCH_SEC
     if (startsEarlier) result = result.filter((note) => note.time !== previous.time)
 
-    let time = startsEarlier ? previous.time : sustain.start
+    // Первые секунды без нот касаются и лучей: игрок ещё не взял руки на клавиши
+    let time = Math.max(FIRST_NOTE_SEC, startsEarlier ? previous.time : sustain.start)
     while (sustain.end - time >= HOLD_MIN_SEC) {
       const duration = Math.min(SUSTAIN_HOLD_MAX_SEC, sustain.end - time)
       const lanes = difficulty.doubleHolds ? SUSTAIN_LANES : [1]

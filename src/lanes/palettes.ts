@@ -39,6 +39,9 @@ export interface Palette {
   /** Цвет суперрежима и короны света над дорожками. */
   overdrive: [number, number, number]
   crown: [number, number, number]
+  /** Цвет лучей удержания. В Огне луч горит языками пламени. */
+  beam: [number, number, number]
+  isFlameBeam: boolean
   /** Цвет звёзд-нот. */
   special: string
   /** Каждая какая обычная нота белая, как центр чашки. 0 — белых нет. */
@@ -67,6 +70,8 @@ export const PALETTES: Record<PaletteId, Palette> = {
     streakColor: [0.7, 1, 0.9],
     overdrive: [1, 0.78, 0.25],
     crown: [0.62, 0.28, 1],
+    beam: [0.72, 0.3, 1],
+    isFlameBeam: false,
     special: '#ffc933',
     whiteNoteEvery: 0,
     allowsDrift: true,
@@ -90,6 +95,8 @@ export const PALETTES: Record<PaletteId, Palette> = {
     streakColor: [1, 0.65, 0.25],
     overdrive: [1, 0.9, 0.45],
     crown: [1, 0.3, 0.08],
+    beam: [1, 0.4, 0.05],
+    isFlameBeam: true,
     special: '#ffc933',
     whiteNoteEvery: 0,
     allowsDrift: false,
@@ -113,6 +120,8 @@ export const PALETTES: Record<PaletteId, Palette> = {
     streakColor: [0.55, 0.57, 0.62],
     overdrive: [0.82, 0.85, 0.92],
     crown: [0.4, 0.4, 0.5],
+    beam: [0.82, 0.84, 0.92],
+    isFlameBeam: false,
     special: '#e8ecf2',
     whiteNoteEvery: 3,
     allowsDrift: false,
@@ -136,6 +145,8 @@ export const PALETTES: Record<PaletteId, Palette> = {
     streakColor: [1, 0.8, 0.95],
     overdrive: [1, 0.85, 0.95],
     crown: [1, 0.4, 0.8],
+    beam: [1, 0.45, 0.8],
+    isFlameBeam: false,
     special: '#ffc933',
     whiteNoteEvery: 0,
     allowsDrift: false,
@@ -150,18 +161,25 @@ export const PALETTE_CHOICES: { id: PaletteChoice; label: string }[] = [
   { id: 'pink', label: 'Розовая' },
 ]
 
+/**
+ * Пороги подобраны на 13 треках: тяжёлые гитары, электроника, рэп, классика и песни
+ * с женским голосом. На других жанрах угадывание может ошибаться, поэтому выбор
+ * всегда остаётся за игроком.
+ */
 /** Середина спектра ровная и плотная: так звучат перегруженные гитары и жёсткий шум. */
-const HEAVY_MID_ROUGHNESS = 0.28
-/** Ясная мелодия звучит меньше этой доли трека. */
+const HEAVY_MID_ROUGHNESS = 0.25
+/** Ясная мелодия звучит меньше этой доли громкой части трека. */
 const HEAVY_MELODY_SHARE = 0.6
-/** Ещё меньше мелодии: звук не яркий, а давящий. */
-const DARK_MELODY_SHARE = 0.45
-/** Высокая ведущая партия, мягкий ритм и мало баса. Проверено слабо: женских песен в замерах не было. */
-const PINK_MIN_PITCH = 66
-const PINK_MAX_ONSET_RATE = 3
-const PINK_MAX_BASS_SHARE = 1.5
+/** Тьма: мелодии почти нет, а бит плотный и частый. Тяжёлые гитары с мелодией остаются Огнём. */
+const DARK_MELODY_SHARE = 0.35
+const DARK_MIN_ONSET_RATE = 3.5
+/** Розовая: ведущий голос высокий, но не так высоко, как синтезатор. Мужской голос ниже. */
+const PINK_MIN_PITCH = 61.5
+const PINK_MAX_PITCH = 65
 const MID_BINS_FROM = 20
 const MID_BINS_TO = 44
+/** Громкая половина трека: всё, что громче медианы. */
+const LOUD_PART_SHARE = 0.5
 
 /**
  * Угадывает палитру по звуку. Это подсказка, а не распознавание жанра: настроения
@@ -169,10 +187,43 @@ const MID_BINS_TO = 44
  * остаётся «Неон».
  */
 export function guessPalette(analysis: AudioAnalysis): PaletteId {
+  const features = soundFeatures(analysis)
+  // Высокий голос важнее тяжёлого звука: женский рок всё равно розовый
+  const isHighVoice = features.medianPitch >= PINK_MIN_PITCH && features.medianPitch <= PINK_MAX_PITCH
+  if (isHighVoice) return 'pink'
+  const isHeavy = features.roughness < HEAVY_MID_ROUGHNESS && features.melodyShare < HEAVY_MELODY_SHARE
+  if (!isHeavy) return 'neon'
+  const isDark = features.melodyShare < DARK_MELODY_SHARE && features.onsetRate >= DARK_MIN_ONSET_RATE
+  return isDark ? 'dark' : 'fire'
+}
+
+/** Признаки звука для выбора палитры. Отдельно, чтобы их можно было смотреть в замерах. */
+export interface SoundFeatures {
+  roughness: number
+  melodyShare: number
+  medianPitch: number
+  bassShare: number
+  onsetRate: number
+}
+
+/**
+ * Считаем только по громкой половине трека: тихое вступление или концовка не должны
+ * решать за всю песню. В тихих кадрах нет ни мелодии, ни гитары, они только сбивают.
+ */
+export function soundFeatures(analysis: AudioAnalysis): SoundFeatures {
   const bins = analysis.spectrumBins
-  const frames = analysis.frameCount
+  const loudness = [...analysis.rms].sort((a, b) => a - b)
+  const threshold = loudness[Math.floor(loudness.length * LOUD_PART_SHARE)]
+
+  let frames = 0
   let roughness = 0
-  for (let frame = 0; frame < frames; frame++) {
+  let melodyFrames = 0
+  const pitches: number[] = []
+  let bass = 0
+  let middle = 0
+  for (let frame = 0; frame < analysis.frameCount; frame++) {
+    if (analysis.rms[frame] < threshold) continue
+    frames += 1
     let mean = 0
     let squares = 0
     for (let bin = MID_BINS_FROM; bin < MID_BINS_TO; bin++) {
@@ -184,24 +235,20 @@ export function guessPalette(analysis: AudioAnalysis): PaletteId {
     mean /= count
     const spread = Math.sqrt(Math.max(0, squares / count - mean * mean))
     roughness += mean > 0.05 ? spread / mean : 1
-  }
-  roughness /= frames
-
-  const voiced = [...analysis.melody.pitch].filter((pitch) => pitch > 0).sort((a, b) => a - b)
-  const melodyShare = voiced.length / frames
-  const medianPitch = voiced.length > 0 ? voiced[Math.floor(voiced.length / 2)] : 0
-
-  let bass = 0
-  let middle = 0
-  for (let frame = 0; frame < frames; frame++) {
+    const pitch = analysis.melody.pitch[frame]
+    if (pitch > 0) {
+      melodyFrames += 1
+      pitches.push(pitch)
+    }
     bass += analysis.raw.bass[frame]
     middle += analysis.raw.mid[frame]
   }
-  const bassShare = bass / Math.max(1e-6, middle)
-  const onsetRate = analysis.onsetTimes.length / analysis.duration
-
-  const isHeavy = roughness < HEAVY_MID_ROUGHNESS && melodyShare < HEAVY_MELODY_SHARE
-  if (isHeavy) return melodyShare < DARK_MELODY_SHARE ? 'dark' : 'fire'
-  const isSoftAndHigh = medianPitch >= PINK_MIN_PITCH && onsetRate < PINK_MAX_ONSET_RATE && bassShare < PINK_MAX_BASS_SHARE
-  return isSoftAndHigh ? 'pink' : 'neon'
+  pitches.sort((a, b) => a - b)
+  return {
+    roughness: roughness / Math.max(1, frames),
+    melodyShare: melodyFrames / Math.max(1, frames),
+    medianPitch: pitches.length > 0 ? pitches[Math.floor(pitches.length / 2)] : 0,
+    bassShare: bass / Math.max(1e-6, middle),
+    onsetRate: analysis.onsetTimes.length / analysis.duration,
+  }
 }

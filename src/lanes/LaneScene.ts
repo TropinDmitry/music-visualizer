@@ -278,6 +278,8 @@ const fanFragment = /* glsl */ `
   uniform float uStreak;
   uniform float uOverdrive;
   uniform vec3 uOverdriveColor;
+  uniform vec3 uBeamColor;
+  uniform float uBeamFlame;
   uniform vec3 uBeams[6];
   uniform float uBeamHeld[6];
   varying vec2 vUv;
@@ -324,9 +326,17 @@ const fanFragment = /* glsl */ `
       if (int(uBeams[i].x) != lane) continue;
       if (closeness > uBeams[i].y || closeness < uBeams[i].z) continue;
       float width = 0.2 + 0.05 * sin(distanceAway * 9.0 - uTrackTime * 12.0) * uBeamHeld[i];
+      // Огненный луч: языки бегут по лучу и раздувают его, края красные, сердцевина почти белая
+      float tongues = 0.5 + 0.25 * sin(distanceAway * 11.0 - uTrackTime * 16.0)
+        + 0.25 * sin(distanceAway * 23.0 - uTrackTime * 27.0 + fromCenter * 9.0);
+      width *= 1.0 + uBeamFlame * (0.25 + 0.6 * tongues);
       float core = 1.0 - smoothstep(width * 0.3, width, fromCenter);
-      // Луч того же цвета, что и обычная нота: это продолжение ноты, а не дорожка
-      vec3 beamColor = mix(vec3(0.72, 0.3, 1.0), vec3(1.0), 0.1 + 0.45 * uBeamHeld[i]);
+      // Луч в цвете палитры: это продолжение ноты, а не дорожка
+      vec3 beamColor = mix(uBeamColor, vec3(1.0), 0.1 + 0.45 * uBeamHeld[i]);
+      float heat = core * (0.55 + 0.45 * tongues);
+      vec3 flame = mix(vec3(0.85, 0.1, 0.02), vec3(1.0, 0.55, 0.08), smoothstep(0.1, 0.6, heat));
+      flame = mix(flame, vec3(1.0, 0.92, 0.6), smoothstep(0.65, 1.0, heat) * (0.5 + 0.5 * uBeamHeld[i]));
+      beamColor = mix(beamColor, flame, uBeamFlame);
       color = mix(color, beamColor, core);
       alpha = max(alpha, core * (0.75 + 0.25 * uBeamHeld[i]));
     }
@@ -728,6 +738,8 @@ export class LaneScene {
     uLaneBad: { value: [0, 0, 0] },
     uBeams: { value: createEmptyBeams() },
     uBeamHeld: { value: new Array(MAX_BEAMS).fill(0) },
+    uBeamColor: { value: new THREE.Vector3(...PALETTES.neon.beam) },
+    uBeamFlame: { value: 0 },
   }
   /** Палитра: цвета нот, ступеней множителя, тонировка клипа. */
   private palette: Palette = PALETTES.neon
@@ -1006,6 +1018,8 @@ export class LaneScene {
     this.clipUniforms.uStreakColor.value.set(...palette.streakColor)
     this.clipUniforms.uCrownColor.value.set(...palette.crown)
     this.sharedUniforms.uOverdriveColor.value.set(...palette.overdrive)
+    this.fanUniforms.uBeamColor.value.set(...palette.beam)
+    this.fanUniforms.uBeamFlame.value = palette.isFlameBeam ? 1 : 0
     for (let i = 0; i < MAX_NOTES; i++) this.noteHalos.setColorAt(i, this.color.set(palette.tap))
     const noteUniforms = (this.tapNotes.material as THREE.ShaderMaterial).uniforms
     noteUniforms.uShimmerFrom.value.set(...palette.shimmer[0])

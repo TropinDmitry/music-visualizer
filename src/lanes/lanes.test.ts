@@ -448,7 +448,7 @@ describe('плотность по силе песни', () => {
 })
 
 describe('палитры', () => {
-  it('низкий тон остаётся неоном, высокий мягкий розовый, плотный шум без мелодии тяжёлый', () => {
+  it('низкий тон остаётся неоном, высокий голос розовый, плотный шум без мелодии тяжёлый', () => {
     const rate = 44100
     const toneOf = (hz: number) => {
       const tone = new Float32Array(rate * 12)
@@ -456,7 +456,7 @@ describe('палитры', () => {
       return analyzeAudio(tone, rate)
     }
     expect(guessPalette(toneOf(220))).toBe('neon')
-    expect(guessPalette(toneOf(660))).toBe('pink')
+    expect(guessPalette(toneOf(330))).toBe('pink')
 
     const noise = new Float32Array(rate * 12)
     let seed = 7
