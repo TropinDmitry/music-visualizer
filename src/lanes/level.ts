@@ -145,7 +145,22 @@ const LADDER_SOUND_SHARE = 0.5
  * Вне лесенок ноты не чаще этого. Детектор слышит каждый тик тарелки, и на длинном
  * шаге шестнадцатые шли бы сплошь, пять–семь нажатий в секунду, за которыми теряется мелодия.
  */
-const PLAIN_MIN_GAP_SEC = 0.22
+const PLAIN_MIN_GAP_SEC = 0.18
+/**
+ * Самый короткий промежуток между нотами в спокойной части. Когда музыка простая,
+ * пара нот вплотную непонятна и не успевается; к мощной части предел плавно
+ * спадает до предела сложности. Лесенок и читки это не касается.
+ */
+const CALM_MIN_GAP_SEC = 0.3
+/**
+ * Пианино звучит в полосе голоса, и его ноты похожи на слоги. Но у инструмента
+ * высота чистая: «слоги» совпадают с ясными нотами мелодии. В читке Rap God,
+ * Look At Me Now и Lollipop средняя ясность совпавших нот не выше 3,3, у пианино
+ * в L's Ideology от 4,3. Совпадение ищем в пределах этого окна, в секундах.
+ */
+const TONAL_MATCH_SEC = 0.06
+const TONAL_MIN_SHARE = 0.4
+const TONAL_MIN_CLARITY = 3.8
 /** Ноты дальше этого уже не одна серия пальцев. */
 const ROLL_MAX_GAP_SEC = 0.5
 /** Рисунки пальцев: круги в обе стороны, зигзаги и возвраты к одной дорожке. */
@@ -318,7 +333,12 @@ export function generateLaneLevel(
   const withAccents = addAccents(withHolds, moments, sections, sustains, analysis, intensity)
   if (trace) trace.beforeLimit = withAccents
   // Последним: предыдущие шаги убирают ноты, и соседями могут оказаться ноты с одной дорожки
-  return avoidTriples(dropNotesUnderBeams(trimBeamsAtSpaces(limitDensity(withAccents, difficulty))), isLadder)
+  const gapAt = (note: LaneNote) => {
+    if (isLadder(note)) return difficulty.floorGapSec
+    const calm = 1 - smoothstep(CALM_LEVEL, ACTIVE_LEVEL, intensityAt(intensity, note.time, analysis.fps))
+    return Math.max(difficulty.floorGapSec, difficulty.floorGapSec + (CALM_MIN_GAP_SEC - difficulty.floorGapSec) * calm)
+  }
+  return avoidTriples(dropNotesUnderBeams(trimBeamsAtSpaces(limitDensity(withAccents, difficulty, gapAt))), isLadder)
 }
 
 /**
@@ -602,7 +622,7 @@ function lastNoteBefore(notes: LaneNote[], time: number): LaneNote | null {
  * такая нота стоит вплотную к обычной, уходит обычная. Парная нота считается как
  * одно нажатие.
  */
-function limitDensity(notes: LaneNote[], difficulty: Difficulty): LaneNote[] {
+function limitDensity(notes: LaneNote[], difficulty: Difficulty, gapAt: (note: LaneNote) => number): LaneNote[] {
   const isProtected = (note: LaneNote) => note.kind === 'space' || note.kind === 'swipe' || note.kind === 'hold'
   const kept: LaneNote[] = []
 
@@ -616,20 +636,20 @@ function limitDensity(notes: LaneNote[], difficulty: Difficulty): LaneNote[] {
 
     if (isProtected(note)) {
       // Луч вплотную к другой главной ноте не сыграть: он уступает
-      const isCrowded = previous !== undefined && note.time - previous.time < difficulty.floorGapSec
+      const isCrowded = previous !== undefined && note.time - previous.time < gapAt(note)
       if (note.kind === 'hold' && isCrowded && isProtected(previous)) continue
 
       // Убираем слишком близкие обычные ноты перед главной, вместе с парой
       while (kept.length > 0) {
         const last = kept[kept.length - 1]
-        if (isProtected(last) || note.time - last.time >= difficulty.floorGapSec) break
+        if (isProtected(last) || note.time - last.time >= gapAt(note)) break
         kept.pop()
       }
       kept.push(note)
       continue
     }
 
-    const tooClose = previous !== undefined && note.time - previous.time < difficulty.floorGapSec
+    const tooClose = previous !== undefined && note.time - previous.time < gapAt(note)
     if (tooClose || pressesInLastSecond(kept, note.time) >= difficulty.maxPerSecond) continue
     kept.push(note)
   }
@@ -758,6 +778,7 @@ function findReadingSpans(
     const count = analysis.syllableTimes.filter((time) => time >= center - half && time < center + half).length
     const isHeld = sustains.some((sustain) => sustain.start < center && sustain.end > center)
     if (isHeld || count / READING_WINDOW_SEC < READING_MIN_RATE) continue
+    if (isPlayedMelody(analysis, center - half, center + half)) continue
     const start = center - READING_STEP_SEC / 2
     const last = spans[spans.length - 1]
     // Короткий провал посреди читки её не прерывает: это вдох, а не конец куплета
@@ -765,6 +786,29 @@ function findReadingSpans(
     else spans.push({ start, end: center + READING_STEP_SEC / 2 })
   }
   return spans.filter((span) => span.end - span.start >= READING_MIN_SEC)
+}
+
+/** Звуки в окне это ноты инструмента, а не слоги: большинство совпадает с ясной мелодией. */
+function isPlayedMelody(analysis: AudioAnalysis, from: number, to: number): boolean {
+  const { noteTimes, noteStrengths } = analysis.melody
+  const syllables = analysis.syllableTimes.filter((time) => time >= from && time < to)
+  let matched = 0
+  let clarity = 0
+  for (const time of syllables) {
+    // Первая нота не раньше окна совпадения: список нот идёт по времени
+    let low = 0
+    let high = noteTimes.length
+    while (low < high) {
+      const middle = (low + high) >> 1
+      if (noteTimes[middle] <= time - TONAL_MATCH_SEC) low = middle + 1
+      else high = middle
+    }
+    const best = low
+    if (best >= noteTimes.length || noteTimes[best] >= time + TONAL_MATCH_SEC) continue
+    matched += 1
+    clarity += noteStrengths[best]
+  }
+  return matched > 0 && matched / syllables.length >= TONAL_MIN_SHARE && clarity / matched >= TONAL_MIN_CLARITY
 }
 
 /**
@@ -1297,4 +1341,10 @@ function spectrumCenter(analysis: AudioAnalysis, frame: number): number {
     sum += value
   }
   return sum === 0 ? 0 : weightedSum / sum
+}
+
+/** Плавный переход от 0 к 1 между двумя порогами. */
+function smoothstep(from: number, to: number, value: number): number {
+  const t = Math.min(1, Math.max(0, (value - from) / (to - from)))
+  return t * t * (3 - 2 * t)
 }
