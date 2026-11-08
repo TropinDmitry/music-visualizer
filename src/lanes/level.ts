@@ -139,6 +139,13 @@ const CALM_LEVEL = 0.3
 const ACTIVE_LEVEL = 0.6
 /** Сколько настоящих ударов нужно в шаге, чтобы лесенка была под музыку. */
 const LADDER_MIN_HITS = 2
+/** Лесенка только там, где звучит хотя бы половина долей шага: иначе это беготня по пустым местам. */
+const LADDER_SOUND_SHARE = 0.5
+/**
+ * Вне лесенок ноты не чаще этого. Детектор слышит каждый тик тарелки, и на длинном
+ * шаге шестнадцатые шли бы сплошь, пять–семь нажатий в секунду, за которыми теряется мелодия.
+ */
+const PLAIN_MIN_GAP_SEC = 0.22
 /** Ноты дальше этого уже не одна серия пальцев. */
 const ROLL_MAX_GAP_SEC = 0.5
 /** Рисунки пальцев: круги в обе стороны, зигзаги и возвраты к одной дорожке. */
@@ -824,49 +831,88 @@ function arrangeRhythm(
   const ladder: number[] = []
   const rhythmic: number[] = []
   const beats = new Map<number, number>()
+  const pickedSet = new Set(picked)
 
   for (const chain of [...softChains, ...chains]) {
     if (chain.length < 2) continue
     const isSoft = softChains.includes(chain)
     const steps: Set<number>[] = []
+    // Доли, на которых вообще что-то звучит, и ближайший к доле настоящий звук
+    const soundingSteps: Set<number>[] = []
+    const realFrames: Map<number, number>[] = []
     for (let i = 0; i + 1 < chain.length; i++) {
       const slotCount = slotsInStep(chain[i + 1] - chain[i])
       const slotSec = (chain[i + 1] - chain[i]) / slotCount
       const slots = new Set<number>()
+      const sounding = new Set<number>()
+      const real = new Map<number, number>()
       // Мелочь отбиваем только в мощной части, иначе спокойное начало сложнее припева
       const level = intensityAt(intensity, chain[i], fps)
-      for (const frame of level < ACTIVE_LEVEL ? picked : heard) {
-        const slot = Math.round((frame / fps - chain[i]) / slotSec)
-        if (slot >= 0 && slot < slotCount) slots.add(slot)
+      const usable = level < ACTIVE_LEVEL ? pickedSet : null
+      for (const frame of heard) {
+        const position = (frame / fps - chain[i]) / slotSec
+        const slot = Math.round(position)
+        if (slot < 0 || slot >= slotCount) continue
+        sounding.add(slot)
+        if (usable && !usable.has(frame)) continue
+        slots.add(slot)
+        const known = real.get(slot)
+        const isCloser = known === undefined || Math.abs(position - slot) < Math.abs((known / fps - chain[i]) / slotSec - slot)
+        if (isCloser) real.set(slot, frame)
       }
       steps.push(slots)
+      soundingSteps.push(sounding)
+      realFrames.push(real)
     }
 
     const first = chain[0] - PULSE_EDGE_SEC
     const last = chain[chain.length - 1]
     frames = frames.filter((frame) => frame / fps < first || frame / fps >= last)
 
-    const canLadder = (step: number) => intensityAt(intensity, chain[step], fps) >= ACTIVE_LEVEL
+    const canLadder = (step: number) =>
+      intensityAt(intensity, chain[step], fps) >= ACTIVE_LEVEL &&
+      steps[step].size >= slotsInStep(chain[step + 1] - chain[step]) * LADDER_SOUND_SHARE
     const ladderSteps = difficulty.isAdvanced ? chooseLadderSteps(steps, canLadder, difficulty.ladderPhraseSteps) : new Set<number>()
     for (let i = 0; i < steps.length; i++) {
       const slotCount = slotsInStep(chain[i + 1] - chain[i])
       const slotSec = (chain[i + 1] - chain[i]) / slotCount
       const toFrame = (slot: number) => Math.round((chain[i] + slot * slotSec) * fps)
       beats.set(toFrame(0), chain[i + 1] - chain[i])
-      if (ladderSteps.has(i)) {
+      const isLadder = ladderSteps.has(i)
+      let ladderFrom = 0
+      let ladderTo = slotCount
+      // На длинном шаге шестнадцатые на весь шаг это десять нот подряд: лесенка берёт
+      // одну его половину, ту, где звучит больше
+      if (isLadder && slotCount > STEP_SLOTS && !difficulty.isEighthsOnly) {
+        const half = slotCount / 2
+        const heardIn = (from: number) => [...soundingSteps[i]].filter((slot) => slot >= from && slot < from + half).length
+        ladderFrom = heardIn(half) > heardIn(0) ? half : 0
+        ladderTo = ladderFrom + half
+      }
+      if (isLadder) {
         // Средней сложности на длинном шаге лесенка идёт через долю: шестнадцатые для неё быстры
         const stride = slotCount > STEP_SLOTS && difficulty.isEighthsOnly ? 2 : 1
-        for (let slot = 0; slot < slotCount; slot += stride) ladder.push(toFrame(slot))
-        // Если музыка не кончилась, лесенка тянется ещё на две ноты
-        const isLong = difficulty.doubleHolds && i + 1 < steps.length && steps[i + 1].size >= LADDER_MIN_HITS
-        if (isLong && !ladderSteps.has(i + 1)) ladder.push(toFrame(slotCount), toFrame(slotCount + stride))
-        continue
+        for (let slot = ladderFrom; slot < ladderTo; slot += stride) ladder.push(toFrame(slot))
+        if (ladderTo < slotCount) {
+          // Лесенка в первой половине шага приходит на его середину
+          ladder.push(toFrame(ladderTo))
+        } else {
+          // Если музыка не кончилась, лесенка тянется ещё на две ноты
+          const isLong = difficulty.doubleHolds && i + 1 < steps.length && steps[i + 1].size >= LADDER_MIN_HITS
+          const tail = ladderFrom > 0 ? [slotCount] : [slotCount, slotCount + stride]
+          if (isLong && !ladderSteps.has(i + 1)) ladder.push(...tail.map(toFrame))
+        }
+        if (ladderFrom === 0 && ladderTo === slotCount) continue
       }
       const isShort = chain[i + 1] - chain[i] < SHORT_STEP_SEC
       const isCalm = intensityAt(intensity, chain[i], fps) < CALM_LEVEL
-      for (const slot of chooseSlots(steps[i], slotCount, difficulty, isSoft, isShort, isCalm)) {
-        frames.push(toFrame(slot))
-        rhythmic.push(toFrame(slot))
+      const stride = slotSec < PLAIN_MIN_GAP_SEC ? 2 : 1
+      for (const slot of chooseSlots(steps[i], soundingSteps[i], slotCount, stride, difficulty, isSoft, isShort, isCalm)) {
+        if (isLadder && slot >= ladderFrom && slot <= ladderTo) continue
+        // Нота встаёт на сам звук, а не на расчётную долю: живой темп дышит, и сетка от него уходит
+        const frame = realFrames[i].get(slot) ?? toFrame(slot)
+        frames.push(frame)
+        rhythmic.push(frame)
       }
     }
   }
@@ -918,10 +964,16 @@ function chooseLadderSteps(
   return chosen
 }
 
-/** Обычный шаг: настоящие удары плюс опорные доли, чтобы рука не теряла ритм. */
+/**
+ * Обычный шаг: настоящие удары плюс опорные доли, чтобы рука не теряла ритм.
+ * Опорная доля ставится, только если на ней что-то звучит: в тихом месте
+ * нота без звука непонятна, под что её жать.
+ */
 function chooseSlots(
   real: Set<number>,
+  sounding: Set<number>,
   slotCount: number,
+  stride: number,
   difficulty: Difficulty,
   isSoft: boolean,
   isShort: boolean,
@@ -929,16 +981,19 @@ function chooseSlots(
 ): Set<number> {
   // На коротком шаге все доли дали бы пять нажатий в секунду всю песню подряд
   const isCoarse = isShort || isCalm || difficulty.isEighthsOnly
-  const coarseStride = slotCount / 2
-  const slots = new Set([...real].filter((slot) => !isCoarse || slot % coarseStride === 0))
+  const step = isCoarse ? slotCount / 2 : stride
+  const slots = new Set([...real].filter((slot) => slot % step === 0))
   // На мягком пульсе ударов почти не слышно, поэтому рисунок «тук, ту-тук» держит сам шаг
   if (isSoft && !difficulty.isEighthsOnly) slots.add(Math.round(slotCount * 0.75))
+  const addIfHeard = (slot: number) => {
+    if (isSoft || sounding.has(slot)) slots.add(slot)
+  }
   // Спокойной части хватает опоры на начало шага: иначе она сложнее припева
   if (isCalm) {
-    slots.add(0)
+    addIfHeard(0)
     return slots
   }
-  for (const share of difficulty.pulsePattern) slots.add(Math.round(share * slotCount))
+  for (const share of difficulty.pulsePattern) addIfHeard(Math.round(share * slotCount))
   return slots
 }
 
