@@ -896,9 +896,10 @@ function arrangeRhythm(
       const slots = new Set<number>()
       const sounding = new Set<number>()
       const real = new Map<number, number>()
-      // Мелочь отбиваем только в мощной части, иначе спокойное начало сложнее припева
+      // В спокойной части отбиваем только заметные удары, иначе она сложнее припева.
+      // Уже в средней сетка отбивает всё, что звучит: ровный ритм руке хочется отбивать
       const level = intensityAt(intensity, chain[i], fps)
-      const usable = level < ACTIVE_LEVEL ? pickedSet : null
+      const usable = level < CALM_LEVEL ? pickedSet : null
       for (const frame of heard) {
         const position = (frame / fps - chain[i]) / slotSec
         const slot = Math.round(position)
