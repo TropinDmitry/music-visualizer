@@ -22,7 +22,9 @@ const ARROW_BONUS = 1.5
 const STAR_BONUS = 2
 /** Сколько звёзд нужно собрать для суперрежима. */
 export const STARS_FOR_OVERDRIVE = 3
-const OVERDRIVE_SEC = 8
+export const OVERDRIVE_SEC = 8
+/** Звезда во время суперрежима не копится, а продлевает его на треть. */
+const OVERDRIVE_EXTEND_SEC = OVERDRIVE_SEC / STARS_FOR_OVERDRIVE
 const OVERDRIVE_BONUS = 2
 /** Пока луч зажат, очки капают маленькими порциями. */
 const HOLD_TICK_SEC = 0.1
@@ -58,6 +60,8 @@ export interface LaneEvent {
   noteTime: number
   /** На этой ноте включился суперрежим. */
   startedOverdrive?: boolean
+  /** Звезда продлила уже идущий суперрежим. */
+  extendedOverdrive?: boolean
 }
 
 /** Луч, который игрок сейчас держит. */
@@ -266,7 +270,11 @@ function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => bo
   const points = (isPerfect ? PERFECT_POINTS : GOOD_POINTS) * multiplier(game) * bonus * overdriveBonus
 
   let startedOverdrive = false
-  if (nearest.kind === 'star') {
+  let extendedOverdrive = false
+  if (nearest.kind === 'star' && isOverdrive(game, nearest.time)) {
+    game.overdriveUntil += OVERDRIVE_EXTEND_SEC
+    extendedOverdrive = true
+  } else if (nearest.kind === 'star') {
     game.starCharge += 1
     if (game.starCharge >= STARS_FOR_OVERDRIVE) {
       game.starCharge = 0
@@ -291,6 +299,7 @@ function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => bo
     warning: false,
     noteTime: nearest.time,
     startedOverdrive,
+    extendedOverdrive,
   }
 }
 

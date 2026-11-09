@@ -84,33 +84,64 @@
 }
 
 .side-pill {
+  --rail: var(--tier);
   position: absolute;
   bottom: 30vh;
-  width: 118px;
+  width: 132px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 8px 12px;
-  background: rgba(10, 6, 30, 0.8);
-  border: 2px solid var(--tier);
-  transition: border-color 0.2s;
+  gap: 5px;
+  padding: 10px 14px 12px;
+  /* Подложка отдельным слоем: её срезанный угол не должен обрезать подсказки рядом */
+  isolation: isolate;
+}
+
+/* Неоновая рейка у края экрана: подложка тает к центру, угол срезан */
+.side-pill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background: linear-gradient(90deg, rgba(8, 4, 26, 0.82) 30%, rgba(8, 4, 26, 0));
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%, 0 100%);
+}
+
+.side-pill::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--rail);
+  box-shadow: 0 0 12px var(--rail), 0 0 2px #ffffff;
 }
 
 .side-left {
   left: 0;
-  border-left: none;
-  border-radius: 0 16px 16px 0;
+}
+
+.side-left::before {
+  left: 0;
 }
 
 .side-right {
+  --rail: var(--energy);
   right: 0;
-  border-right: none;
-  border-radius: 16px 0 0 16px;
   align-items: flex-end;
+  text-align: right;
+}
+
+.side-right::after {
+  background: linear-gradient(270deg, rgba(8, 4, 26, 0.82) 30%, rgba(8, 4, 26, 0));
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 14px 100%, 0 calc(100% - 14px));
+}
+
+.side-right::before {
+  right: 0;
 }
 
 .is-danger .side-pill {
-  border-color: #ff5c6c;
+  --rail: #ff5c6c;
 }
 
 .pill-main {
@@ -158,10 +189,12 @@
   }
 }
 
-.tier-6 .side-left,
-.tier-7 .side-left,
-.tier-8 .side-left {
-  box-shadow: 0 0 calc(var(--level) * 3px) var(--tier);
+/* На высоких множителях рейка светит сильнее */
+.tier-6 .side-left::before,
+.tier-7 .side-left::before,
+.tier-8 .side-left::before {
+  width: 4px;
+  box-shadow: 0 0 calc(var(--level) * 3px) var(--tier), 0 0 2px #ffffff;
 }
 
 /* Множитель сбит: панель вспыхивает красным и вздрагивает, потерянная ступень улетает */
@@ -215,15 +248,17 @@
 
 .multiplier-bar {
   width: 100%;
-  height: 6px;
-  border-radius: 3px;
-  background: rgba(255, 255, 255, 0.16);
+  height: 7px;
+  background: rgba(255, 255, 255, 0.14);
   overflow: hidden;
+  /* Шкала из сегментов: так видно шаги, а не просто полоску */
+  mask: repeating-linear-gradient(90deg, #000 0 9px, transparent 9px 12px);
 }
 
 .multiplier-bar div {
   height: 100%;
   background: var(--tier);
+  box-shadow: 0 0 8px var(--tier);
   transition: width 0.1s;
 }
 
@@ -373,8 +408,17 @@
   }
 
   .side-pill {
-    width: 84px;
-    padding: 6px 8px;
+    width: 92px;
+    padding: 8px 10px 10px;
+  }
+
+  .star-meter {
+    height: 16px;
+  }
+
+  .star-hint {
+    max-width: 150px;
+    font-size: 12px;
   }
 
   .pill-main {
@@ -438,22 +482,139 @@
     0 0 54px color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
-.star-pips {
+/* Шкала звёзд: три скошенных деления, каждая звезда зажигает одно */
+.star-meter {
+  position: relative;
   display: flex;
-  gap: 2px;
-  font-size: 15px;
-  line-height: 1;
-  color: rgba(255, 255, 255, 0.22);
+  gap: 4px;
+  height: 20px;
+  margin-top: 3px;
 }
 
-.star-pips .is-earned {
-  color: var(--special);
-  text-shadow: 0 0 8px var(--special);
+.star-meter span {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transform: skewX(-16deg);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.28);
+  font-size: 12px;
+  line-height: 1;
+  transition: background 0.2s, color 0.2s;
+}
+
+.star-meter span.is-earned {
+  border-color: var(--special);
+  background: var(--special);
+  color: #1a0f05;
+  box-shadow: 0 0 10px var(--special);
+  animation: star-fill 0.35s cubic-bezier(0.2, 1.6, 0.4, 1);
+}
+
+@keyframes star-fill {
+  from {
+    transform: skewX(-16deg) scale(1.5);
+  }
+}
+
+/* Полная шкала становится таймером Fever и убывает до конца бонуса */
+.star-meter.is-fever {
+  transform: skewX(-16deg);
+  border: 1px solid var(--overdrive);
+  background: rgba(255, 255, 255, 0.06);
+  box-shadow: 0 0 12px var(--overdrive);
+  animation: fever-start 0.5s ease-out;
+}
+
+.star-meter .fever-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--overdrive);
+  transition: width 0.1s linear;
+}
+
+.star-meter.is-fever span {
+  position: relative;
+  flex: 1;
+  transform: none;
+  border: none;
+  background: none;
+  /* Белый с тёмной обводкой: читается и на полной части полосы, и на опустевшей */
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-shadow:
+    0 0 3px rgba(0, 0, 0, 0.95),
+    0 1px 2px rgba(0, 0, 0, 0.9);
+  animation: none;
+}
+
+@keyframes fever-start {
+  from {
+    filter: brightness(2.2);
+  }
+}
+
+/* Звезда во время Fever добавляет время: число всплывает над шкалой */
+.fever-boost {
+  position: absolute;
+  bottom: 100%;
+  left: 14px;
+  color: var(--overdrive);
+  font-weight: 800;
+  text-shadow: 0 0 10px var(--overdrive);
+  pointer-events: none;
+  animation: fever-boost 0.9s ease-out forwards;
+}
+
+@keyframes fever-boost {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-26px);
+  }
+}
+
+/* Подсказка про звёзды: один раз за партию, рядом со шкалой */
+.star-hint {
+  position: absolute;
+  left: calc(100% + 8px);
+  bottom: 8px;
+  width: max-content;
+  max-width: 220px;
+  padding: 6px 10px;
+  border: 1px solid var(--special);
+  background: rgba(8, 4, 26, 0.88);
+  color: #ffffff;
+  font-size: 13px;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--special) 50%, transparent);
+  animation: star-hint 3.5s ease-out forwards;
+}
+
+@keyframes star-hint {
+  0% {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  8%,
+  85% {
+    opacity: 1;
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+  }
 }
 
 /* Цвет суперрежима задаёт палитра: в Тьме он серебряный, а не золотой */
 .is-overdrive .side-pill {
-  border-color: var(--overdrive);
+  --rail: var(--overdrive);
 }
 
 .is-overdrive .score-value {

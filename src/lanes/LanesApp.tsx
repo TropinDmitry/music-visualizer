@@ -26,6 +26,7 @@ import {
   isSpaceDue,
   MISS_WARNING_STREAK,
   multiplier,
+  OVERDRIVE_SEC,
   multiplierProgress,
   playAutopilot,
   pressLane,
@@ -73,6 +74,8 @@ interface Hud {
   streakFill: number
   starCharge: number
   isOverdrive: boolean
+  /** Сколько секунд Fever осталось. */
+  feverLeft: number
 }
 
 /** Большая надпись по центру: похвала или предупреждение. */
@@ -126,7 +129,10 @@ const EMPTY_HUD: Hud = {
   streakFill: 0,
   starCharge: 0,
   isOverdrive: false,
+  feverLeft: 0,
 }
+/** Сколько секунд держится подсказка про звёзды после первой звезды. */
+const STAR_HINT_MS = 3500
 const LANE_KEYS: Record<string, number> = { KeyA: 0, KeyS: 1, KeyD: 2, Digit1: 0, Digit2: 1, Digit3: 2 }
 const NO_JUDGED = new Set<number>()
 const NO_HOLDS = [null, null, null]
@@ -277,6 +283,10 @@ export function LanesApp() {
   const [banner, setBanner] = useState<Banner | null>(null)
   const [popups, setPopups] = useState<Popup[]>([])
   const [lostMultiplier, setLostMultiplier] = useState<{ id: number; from: number } | null>(null)
+  /** Подсказка про звёзды: показывается один раз за партию, на первой звезде. */
+  const [isStarHintShown, setIsStarHintShown] = useState(false)
+  const hasStarHintRef = useRef(false)
+  const [feverBoost, setFeverBoost] = useState<{ id: number; seconds: number } | null>(null)
   const [result, setResult] = useState<GameResult | null>(null)
   const [settings, setSettings] = useState<Settings>({
     difficulty: 'normal',
@@ -421,6 +431,15 @@ export function LanesApp() {
         showBanner(words.fever, words.feverDetail, false)
         sounds?.milestone()
       }
+      if (event.extendedOverdrive) {
+        nextIdRef.current += 1
+        setFeverBoost({ id: nextIdRef.current, seconds: Math.round((OVERDRIVE_SEC / STARS_FOR_OVERDRIVE) * 10) / 10 })
+      }
+      if (event.kind === 'star' && event.type !== 'miss' && !hasStarHintRef.current) {
+        hasStarHintRef.current = true
+        setIsStarHintShown(true)
+        window.setTimeout(() => setIsStarHintShown(false), STAR_HINT_MS)
+      }
       if (event.warning) {
         showBanner(words.warning, words.warningDetail(MISS_WARNING_STREAK), true)
         sounds?.warning()
@@ -518,6 +537,7 @@ export function LanesApp() {
             streakFill: streakProgress(game.combo),
             starCharge: game.starCharge,
             isOverdrive: isOverdrive(game, time),
+            feverLeft: Math.max(0, game.overdriveUntil - time),
           })
         }
         if (game.failed || !player.isPlaying) finishRef.current()
@@ -790,6 +810,9 @@ export function LanesApp() {
     setHud(EMPTY_HUD)
     setBanner(null)
     setPopups([])
+    setFeverBoost(null)
+    setIsStarHintShown(false)
+    hasStarHintRef.current = false
     player.setVolume(settings.volume)
     player.seek(0)
     if (videoRef.current && clipUrl) videoRef.current.currentTime = 0
@@ -916,13 +939,30 @@ export function LanesApp() {
             <div className="multiplier-bar">
               <div style={{ width: `${hud.multiplierFill * 100}%` }} />
             </div>
-            <div className="star-pips" aria-label={text.starsToFever(hud.starCharge, STARS_FOR_OVERDRIVE)}>
-              {Array.from({ length: STARS_FOR_OVERDRIVE }, (_, index) => (
-                <span key={index} className={index < hud.starCharge ? 'is-earned' : ''}>
-                  ★
+            {/* Три деления звёзд; полная шкала становится таймером Fever и убывает */}
+            {hud.isOverdrive ? (
+              <div className="star-meter is-fever" aria-label={text.fever}>
+                <div className="fever-fill" style={{ width: `${Math.min(1, hud.feverLeft / OVERDRIVE_SEC) * 100}%` }} />
+                <span>
+                  {text.fever} {Math.ceil(hud.feverLeft)}
+                  {text.seconds}
                 </span>
-              ))}
-            </div>
+              </div>
+            ) : (
+              <div className="star-meter" aria-label={text.starsToFever(hud.starCharge, STARS_FOR_OVERDRIVE)}>
+                {Array.from({ length: STARS_FOR_OVERDRIVE }, (_, index) => (
+                  <span key={index} className={index < hud.starCharge ? 'is-earned' : ''}>
+                    ★
+                  </span>
+                ))}
+              </div>
+            )}
+            {feverBoost && (
+              <span className="fever-boost" key={feverBoost.id} onAnimationEnd={() => setFeverBoost(null)}>
+                {text.feverExtended(feverBoost.seconds)}
+              </span>
+            )}
+            {isStarHintShown && <div className="star-hint">{text.starHint}</div>}
           </div>
 
           <div className="side-pill side-right">

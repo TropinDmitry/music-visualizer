@@ -600,6 +600,16 @@ describe('правила', () => {
     expect(pressLane(game, 20, 0)?.points).toBe(250)
   })
 
+  it('звезда во время суперрежима продлевает его, а не копится', () => {
+    const notes: LaneNote[] = [1, 2, 3, 5].map((time, id) => ({ id, time, lane: 0, kind: 'star', direction: 0 }))
+    const game = createLaneGame(notes, easy)
+    for (const time of [1, 2, 3]) pressLane(game, time, 0)
+    expect(isOverdrive(game, 11.5)).toBe(false)
+    expect(pressLane(game, 5, 0)?.extendedOverdrive).toBe(true)
+    expect(game.starCharge).toBe(0)
+    expect(isOverdrive(game, 11.5)).toBe(true)
+  })
+
   it('уровни серии растут с комбо', () => {
     expect(streakTier(5)).toBe(0)
     expect(streakTier(30)).toBe(2)

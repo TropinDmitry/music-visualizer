@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { PALETTES, type HitStyle, type Palette } from './palettes.ts'
-import { SWIPE_LATE_SEC } from './rules.ts'
+import { lateWindow } from './rules.ts'
 import type { FrameFeatures } from '../audio/frameFeatures.ts'
 import { FULLSCREEN_VERTEX, NOISE_GLSL } from '../render/glsl.ts'
 import type { LaneNote } from './level.ts'
@@ -11,8 +11,8 @@ import type { LaneNote } from './level.ts'
  *
  * Дорожки идут тугим пучком сверху и плавным изгибом расходятся к низу экрана.
  * Положение на дорожке задаёт число «близость»: 0 — верх пучка,
- * 1 — линия нажатия. Формула близость = 1 / (1 + расстояние) даёт ощущение
- * глубины: вдали нота ползёт медленно, а у кнопки резко ускоряется и растёт.
+ * 1 — линия нажатия. Нота срывается сверху быстро и тормозит к чаше: скорость
+ * игры чувствуется, а нажать всё равно успеваешь, нота подходит к пальцам медленно.
  */
 
 export type ClipLook = 'outline' | 'duotone' | 'comic' | 'original'
@@ -49,6 +49,11 @@ const LANE_BEND = 1.9
 const MAX_BEAMS = 6
 /** Во сколько раз нота вдали меньше, чем у линии нажатия. */
 const DEPTH = 7
+/**
+ * Торможение нот к чаше: в начале пути нота летит в 1 + NOTE_EASE раза быстрее
+ * средней скорости, у чаши в 1 − NOTE_EASE раза медленнее.
+ */
+const NOTE_EASE = 0.35
 const NOTE_SIZE = 0.42
 /**
  * Все ноты, цели и волны лежат в одной плоскости дорожки, поэтому наклон у них
@@ -103,9 +108,9 @@ const GLINT_LIFETIME_SEC = 0.5
 const MAX_SHOCKWAVES = 8
 const SHOCKWAVE_LIFETIME_SEC = 0.32
 /**
- * Стрелка тормозит на подлёте и замирает на краю чаши. Дальше её закрыл бы передний
- * край чаши, а у самой чаши перспектива так растянута, что занос уносит ноту за экран.
- * Числа в секундах пути: где начинается торможение и где стрелка встаёт.
+ * Нота тормозит на подлёте и замирает на краю чаши, пока её можно нажать. Дальше её
+ * закрыл бы передний край чаши, а у самой чаши перспектива так растянута, что занос
+ * уносит ноту за экран. Числа в секундах пути: где начинается торможение и где нота встаёт.
  */
 const ARROW_BRAKE_FROM_SEC = 0.04
 const ARROW_REST_SEC = 0.008
@@ -1291,7 +1296,13 @@ export class LaneScene {
   }
 
   private closenessAt(remaining: number, approachSec: number): number {
-    return 1 / (1 + (Math.max(remaining, -approachSec * 0.1) / approachSec) * (DEPTH - 1))
+    // Доля пройденного пути по времени: 0 — нота появилась, 1 — она на чаше
+    const passed = 1 - Math.max(remaining, -approachSec * 0.1) / approachSec
+    // Путь по экрану идёт быстрее времени в начале и медленнее у чаши; после чаши
+    // нота уходит той же скоростью, с какой подошла
+    const travelled = passed <= 1 ? passed + NOTE_EASE * passed * (1 - passed) : 1 + (passed - 1) * (1 - NOTE_EASE)
+    const start = 1 / DEPTH
+    return start + (1 - start) * travelled
   }
 
   /** Какая дорожка под курсором. x в экранных единицах: 0 — центр, половина высоты — 1. */
@@ -1508,15 +1519,17 @@ export class LaneScene {
       if (remaining > approachSec) break
       if (judged.has(note.id)) continue
 
-      const isArrow = note.kind === 'swipe'
-      // Стрелка не пролетает чашу: доходит до неё и тормозит, пока её ещё можно отбить
-      const closeness = this.closenessAt(isArrow ? arrowRemaining(remaining) : remaining, approachSec)
+      // Нота не пролетает чашу: доходит до неё, резко тормозит и лежит на краю, пока её
+      // ещё можно нажать. Голова луча идёт вместе с лучом, иначе оторвалась бы от него
+      const isResting = note.kind !== 'hold'
+      const late = lateWindow(note)
+      const closeness = this.closenessAt(isResting ? arrowRemaining(remaining) : remaining, approachSec)
       const spacing = this.spacingAt(closeness)
       const x = (note.lane - 1) * spacing
       const y = VANISH_Y + (HIT_Y - VANISH_Y) * closeness
       // Размер зависит от расстояния между дорожками, поэтому в узком окне ноты меньше.
-      // Залежавшаяся на чаше стрелка к концу своего окна чуть сжимается: скоро исчезнет
-      const fading = isArrow ? Math.min(1, Math.max(0, (-remaining - SWIPE_LATE_SEC * 0.6) / (SWIPE_LATE_SEC * 0.4))) : 0
+      // Залежавшаяся на чаше нота к концу своего окна чуть сжимается: скоро исчезнет
+      const fading = isResting ? Math.min(1, Math.max(0, (-remaining - late * 0.6) / (late * 0.4))) : 0
       const size = NOTE_SIZE * (spacing / LANE_SPREAD) * (1 - 0.3 * fading)
       const fresh = (remaining / approachSec - (1 - NOTE_REVEAL_SHARE)) / NOTE_REVEAL_SHARE
       const reveal = 1 - THREE.MathUtils.smoothstep(fresh, 0, 1)
