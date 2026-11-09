@@ -139,36 +139,6 @@ const CALM_LEVEL = 0.3
 const ACTIVE_LEVEL = 0.6
 /** Сколько настоящих ударов нужно в шаге, чтобы лесенка была под музыку. */
 const LADDER_MIN_HITS = 2
-/** Лесенка только там, где звучит хотя бы половина долей шага: иначе это беготня по пустым местам. */
-const LADDER_SOUND_SHARE = 0.5
-/**
- * Вне лесенок ноты не чаще этого. Детектор слышит каждый тик тарелки, и на длинном
- * шаге шестнадцатые шли бы сплошь, пять–семь нажатий в секунду, за которыми теряется мелодия.
- */
-const PLAIN_MIN_GAP_SEC = 0.18
-/**
- * Музыка повторяет рисунок такт за тактом, и ноты тоже должны. Доля отрезка
- * ставится в рисунок, если звучит хотя бы в стольких его шагах; удар, который
- * детектор услышал в одном такте и не услышал в соседних, нотой не становится.
- */
-const PATTERN_MIN_SHARE = 0.5
-/** Обычная нота ближе этого к ноте лесенки лишняя. */
-const LADDER_NEIGHBOUR_SEC = 0.1
-/** Насколько звук может отстоять от доли, чтобы нота всё равно встала ровно на долю. */
-const GRID_SNAP_SEC = 0.035
-/**
- * Самый короткий промежуток между нотами в спокойной части. Когда музыка простая,
- * пара нот вплотную непонятна и не успевается; к мощной части предел плавно
- * спадает до предела сложности. Лесенок и читки это не касается.
- */
-const CALM_MIN_GAP_SEC = 0.3
-/**
- * Читка бывает только в песне, где её много. В Rap God и Look At Me Now быстрые слоги
- * идут на 58–59% песни, а в Levels, Painkiller, Stargazing и L's Ideology не больше чем
- * на 14%: там это синтезатор, гитара или пианино в полосе голоса, и ноты на каждый
- * такой «слог» сыпались бы невпопад. Доля песни, начиная с которой читка настоящая.
- */
-const READING_SONG_SHARE = 0.3
 /** Ноты дальше этого уже не одна серия пальцев. */
 const ROLL_MAX_GAP_SEC = 0.5
 /** Рисунки пальцев: круги в обе стороны, зигзаги и возвраты к одной дорожке. */
@@ -231,8 +201,6 @@ const ARROW_CONTRAST_SEC = 0.5
 const ARROW_CONTRAST_FLOOR = 0.02
 /** Совсем вплотную к стрелке обычную ноту не сыграть: руке надо перейти на стрелки. */
 const ARROW_CLEAR_SEC = 0.12
-/** Сколько стрелок подряд в спокойной части. */
-const CALM_ARROW_RUN = 2
 /** Парные ноты на смене ритма не чаще этого: иначе акценты теряют вес. */
 const MIN_ACCENT_GAP_SEC = 12
 /** Смену части ищем рядом с найденным событием, чтобы попасть в реальный удар. */
@@ -254,10 +222,17 @@ const MIN_SPACE_GAP_SEC = 15
 /** Тишина для пробела: хотя бы столько и втрое тише того, что было до неё. */
 const SPACE_SILENCE_SEC = 0.8
 const SPACE_SILENCE_SHARE = 0.3
-const SPACE_LOOK_SEC = 3
-const SPACE_EDGE_SEC = 3
+/**
+ * Сила до и после границы части сравнивается в окнах вплотную к ней: сила не
+ * перетекает через границу, и отступ только захватил бы соседнюю часть. В Levels
+ * перед дропом на 75-й секунде три секунды затишья, а до них мощный разгон.
+ */
+const SPACE_LOOK_SEC = 2.5
+const SPACE_EDGE_SEC = 0
+/** После границы сила может набираться несколько секунд, поэтому окно «после» длиннее. */
+const SPACE_AFTER_SEC = 5
 /** Подъём силы песни на границе части, после которого стоит пробел. */
-const SPACE_MIN_RISE = 0.35
+const SPACE_MIN_RISE = 0.3
 
 /** Что происходило внутри генератора: нужно только странице-рентгену. */
 export interface LevelTrace {
@@ -332,7 +307,7 @@ export function generateLaneLevel(
   markLastNotesBeforePauses(notes, moments)
   const sections = findSections(analysis, intensity)
   const phraseEnds = focus === 'voice' ? [] : findPhraseEnds(analysis, [...softChains, ...chains], moments)
-  const withArrows = placeArrowAccents(notes, analysis, difficulty, phraseEnds, sustains, moments, intensity)
+  const withArrows = placeArrowAccents(notes, analysis, difficulty, phraseEnds, sustains, moments)
   // Быструю читку не разбиваем парами и лучами: это один поток слогов
   const ladderFrames = new Set([...ladder, ...syllables])
   const isLadder = (note: LaneNote) => ladderFrames.has(Math.round(note.time * analysis.fps))
@@ -343,12 +318,7 @@ export function generateLaneLevel(
   const withAccents = addAccents(withHolds, moments, sections, sustains, analysis, intensity)
   if (trace) trace.beforeLimit = withAccents
   // Последним: предыдущие шаги убирают ноты, и соседями могут оказаться ноты с одной дорожки
-  const gapAt = (note: LaneNote) => {
-    if (isLadder(note)) return difficulty.floorGapSec
-    const calm = 1 - smoothstep(CALM_LEVEL, ACTIVE_LEVEL, intensityAt(intensity, note.time, analysis.fps))
-    return Math.max(difficulty.floorGapSec, difficulty.floorGapSec + (CALM_MIN_GAP_SEC - difficulty.floorGapSec) * calm)
-  }
-  return avoidTriples(dropNotesUnderBeams(trimBeamsAtSpaces(limitDensity(withAccents, difficulty, gapAt))), isLadder)
+  return avoidTriples(dropNotesUnderBeams(trimBeamsAtSpaces(limitDensity(withAccents, difficulty))), isLadder)
 }
 
 /**
@@ -364,7 +334,6 @@ function placeArrowAccents(
   phraseEnds: number[],
   sustains: Moment[],
   moments: Moment[],
-  intensity: Float32Array,
 ): LaneNote[] {
   const strengthOf = (note: LaneNote) => {
     const frame = Math.round(note.time * analysis.fps)
@@ -411,14 +380,9 @@ function placeArrowAccents(
     candidates.sort((a, b) => strengthOf(b) - strengthOf(a))
     const strongest = strengthOf(candidates[0])
 
-    // Длинная серия стрелок это нагрузка мощной части, в спокойной хватает двух.
-    // Одной мало: первый удар после тишины часто забирает пробел, и стрелка пропала бы
-    const power = smoothstep(CALM_LEVEL, ACTIVE_LEVEL, intensityAt(intensity, candidates[0].time, analysis.fps))
-    const calmRun = Math.min(CALM_ARROW_RUN, difficulty.arrowRun)
-    const run = Math.round(calmRun + (difficulty.arrowRun - calmRun) * power)
     const chosen: LaneNote[] = []
     for (const note of candidates) {
-      if (chosen.length >= run || strengthOf(note) < strongest * ARROW_STRONG_SHARE) break
+      if (chosen.length >= difficulty.arrowRun || strengthOf(note) < strongest * ARROW_STRONG_SHARE) break
       if (chosen.every((other) => Math.abs(other.time - note.time) >= ARROW_MIN_SPACING_SEC)) chosen.push(note)
     }
     for (const note of chosen) arrows.add(note)
@@ -638,7 +602,7 @@ function lastNoteBefore(notes: LaneNote[], time: number): LaneNote | null {
  * такая нота стоит вплотную к обычной, уходит обычная. Парная нота считается как
  * одно нажатие.
  */
-function limitDensity(notes: LaneNote[], difficulty: Difficulty, gapAt: (note: LaneNote) => number): LaneNote[] {
+function limitDensity(notes: LaneNote[], difficulty: Difficulty): LaneNote[] {
   const isProtected = (note: LaneNote) => note.kind === 'space' || note.kind === 'swipe' || note.kind === 'hold'
   const kept: LaneNote[] = []
 
@@ -652,20 +616,20 @@ function limitDensity(notes: LaneNote[], difficulty: Difficulty, gapAt: (note: L
 
     if (isProtected(note)) {
       // Луч вплотную к другой главной ноте не сыграть: он уступает
-      const isCrowded = previous !== undefined && note.time - previous.time < gapAt(note)
+      const isCrowded = previous !== undefined && note.time - previous.time < difficulty.floorGapSec
       if (note.kind === 'hold' && isCrowded && isProtected(previous)) continue
 
       // Убираем слишком близкие обычные ноты перед главной, вместе с парой
       while (kept.length > 0) {
         const last = kept[kept.length - 1]
-        if (isProtected(last) || note.time - last.time >= gapAt(note)) break
+        if (isProtected(last) || note.time - last.time >= difficulty.floorGapSec) break
         kept.pop()
       }
       kept.push(note)
       continue
     }
 
-    const tooClose = previous !== undefined && note.time - previous.time < gapAt(note)
+    const tooClose = previous !== undefined && note.time - previous.time < difficulty.floorGapSec
     if (tooClose || pressesInLastSecond(kept, note.time) >= difficulty.maxPerSecond) continue
     kept.push(note)
   }
@@ -787,7 +751,6 @@ function findReadingSpans(
 ): { start: number; end: number }[] {
   if (focus === 'beat') return []
   if (focus === 'voice') return [{ start: 0, end: analysis.duration }]
-  if (readingShare(analysis) < READING_SONG_SHARE) return []
 
   const spans: { start: number; end: number }[] = []
   const half = READING_WINDOW_SEC / 2
@@ -802,19 +765,6 @@ function findReadingSpans(
     else spans.push({ start, end: center + READING_STEP_SEC / 2 })
   }
   return spans.filter((span) => span.end - span.start >= READING_MIN_SEC)
-}
-
-/** Доля песни, где слоги идут быстрее порога читки. */
-function readingShare(analysis: AudioAnalysis): number {
-  const half = READING_WINDOW_SEC / 2
-  let fast = 0
-  let total = 0
-  for (let center = half; center < analysis.duration - half; center += READING_STEP_SEC) {
-    const count = analysis.syllableTimes.filter((time) => time >= center - half && time < center + half).length
-    total += 1
-    if (count / READING_WINDOW_SEC >= READING_MIN_RATE) fast += 1
-  }
-  return total === 0 ? 0 : fast / total
 }
 
 /**
@@ -881,128 +831,59 @@ function arrangeRhythm(
   const ladder: number[] = []
   const rhythmic: number[] = []
   const beats = new Map<number, number>()
-  const pickedSet = new Set(picked)
 
   for (const chain of [...softChains, ...chains]) {
     if (chain.length < 2) continue
     const isSoft = softChains.includes(chain)
     const steps: Set<number>[] = []
-    // Доли, на которых вообще что-то звучит, и ближайший к доле настоящий звук
-    const soundingSteps: Set<number>[] = []
-    const realFrames: Map<number, number>[] = []
     for (let i = 0; i + 1 < chain.length; i++) {
       const slotCount = slotsInStep(chain[i + 1] - chain[i])
       const slotSec = (chain[i + 1] - chain[i]) / slotCount
       const slots = new Set<number>()
-      const sounding = new Set<number>()
-      const real = new Map<number, number>()
       // В спокойной части отбиваем только заметные удары, иначе она сложнее припева.
       // Уже в средней сетка отбивает всё, что звучит: ровный ритм руке хочется отбивать
       const level = intensityAt(intensity, chain[i], fps)
-      const usable = level < CALM_LEVEL ? pickedSet : null
-      for (const frame of heard) {
-        const position = (frame / fps - chain[i]) / slotSec
-        const slot = Math.round(position)
-        if (slot < 0 || slot >= slotCount) continue
-        sounding.add(slot)
-        // Ближайший к доле звук: на него встанет нота, если сетка от звука ушла
-        const known = real.get(slot)
-        const isCloser = known === undefined || Math.abs(position - slot) < Math.abs((known / fps - chain[i]) / slotSec - slot)
-        if (isCloser) real.set(slot, frame)
-        if (usable && !usable.has(frame)) continue
-        slots.add(slot)
+      for (const frame of level < CALM_LEVEL ? picked : heard) {
+        const slot = Math.round((frame / fps - chain[i]) / slotSec)
+        if (slot >= 0 && slot < slotCount) slots.add(slot)
       }
       steps.push(slots)
-      soundingSteps.push(sounding)
-      realFrames.push(real)
     }
 
-    const pattern = steadyPattern(steps, chain)
     const first = chain[0] - PULSE_EDGE_SEC
     const last = chain[chain.length - 1]
     frames = frames.filter((frame) => frame / fps < first || frame / fps >= last)
 
-    const canLadder = (step: number) =>
-      intensityAt(intensity, chain[step], fps) >= ACTIVE_LEVEL &&
-      steps[step].size >= slotsInStep(chain[step + 1] - chain[step]) * LADDER_SOUND_SHARE
+    const canLadder = (step: number) => intensityAt(intensity, chain[step], fps) >= ACTIVE_LEVEL
     const ladderSteps = difficulty.isAdvanced ? chooseLadderSteps(steps, canLadder, difficulty.ladderPhraseSteps) : new Set<number>()
     for (let i = 0; i < steps.length; i++) {
       const slotCount = slotsInStep(chain[i + 1] - chain[i])
       const slotSec = (chain[i + 1] - chain[i]) / slotCount
       const toFrame = (slot: number) => Math.round((chain[i] + slot * slotSec) * fps)
       beats.set(toFrame(0), chain[i + 1] - chain[i])
-      const isLadder = ladderSteps.has(i)
-      let ladderFrom = 0
-      let ladderTo = slotCount
-      // На длинном шаге шестнадцатые на весь шаг это десять нот подряд: лесенка берёт
-      // одну его половину, ту, где звучит больше
-      if (isLadder && slotCount > STEP_SLOTS && !difficulty.isEighthsOnly) {
-        const half = slotCount / 2
-        const heardIn = (from: number) => [...soundingSteps[i]].filter((slot) => slot >= from && slot < from + half).length
-        ladderFrom = heardIn(half) > heardIn(0) ? half : 0
-        ladderTo = ladderFrom + half
-      }
-      if (isLadder) {
+      if (ladderSteps.has(i)) {
         // Средней сложности на длинном шаге лесенка идёт через долю: шестнадцатые для неё быстры
         const stride = slotCount > STEP_SLOTS && difficulty.isEighthsOnly ? 2 : 1
-        for (let slot = ladderFrom; slot < ladderTo; slot += stride) ladder.push(toFrame(slot))
-        if (ladderTo < slotCount) {
-          // Лесенка в первой половине шага приходит на его середину
-          ladder.push(toFrame(ladderTo))
-        } else {
-          // Если музыка не кончилась, лесенка тянется ещё на две ноты
-          const isLong = difficulty.doubleHolds && i + 1 < steps.length && steps[i + 1].size >= LADDER_MIN_HITS
-          const tail = ladderFrom > 0 ? [slotCount] : [slotCount, slotCount + stride]
-          if (isLong && !ladderSteps.has(i + 1)) ladder.push(...tail.map(toFrame))
-        }
-        if (ladderFrom === 0 && ladderTo === slotCount) continue
+        for (let slot = 0; slot < slotCount; slot += stride) ladder.push(toFrame(slot))
+        // Если музыка не кончилась, лесенка тянется ещё на две ноты
+        const isLong = difficulty.doubleHolds && i + 1 < steps.length && steps[i + 1].size >= LADDER_MIN_HITS
+        if (isLong && !ladderSteps.has(i + 1)) ladder.push(toFrame(slotCount), toFrame(slotCount + stride))
+        continue
       }
       const isShort = chain[i + 1] - chain[i] < SHORT_STEP_SEC
       const isCalm = intensityAt(intensity, chain[i], fps) < CALM_LEVEL
-      const stride = slotSec < PLAIN_MIN_GAP_SEC ? 2 : 1
-      const steady = new Set([...steps[i]].filter((slot) => pattern.get(slotCount)?.has(slot)))
-      for (const slot of chooseSlots(steady, soundingSteps[i], slotCount, stride, difficulty, isSoft, isShort, isCalm)) {
-        if (isLadder && slot >= ladderFrom && slot <= ladderTo) continue
-        // Звук рядом с долей встаёт ровно на долю: так рисунок ровный. Если живой темп
-        // увёл звук от сетки дальше, нота идёт за звуком
-        const real = realFrames[i].get(slot)
-        const isOffGrid = real !== undefined && Math.abs(real - toFrame(slot)) > GRID_SNAP_SEC * fps
-        const frame = isOffGrid ? real : toFrame(slot)
-        frames.push(frame)
-        rhythmic.push(frame)
+      for (const slot of chooseSlots(steps[i], slotCount, difficulty, isSoft, isShort, isCalm)) {
+        frames.push(toFrame(slot))
+        rhythmic.push(toFrame(slot))
       }
     }
   }
 
-  // Лесенка идёт ровно по сетке, а обычная нота стоит на самом звуке: рядом с лесенкой
-  // она дала бы вторую ноту через пару сотых секунды
-  const ladderGap = LADDER_NEIGHBOUR_SEC * fps
-  const isBesideLadder = (frame: number) => ladder.some((step) => Math.abs(step - frame) < ladderGap)
-  frames = frames.filter((frame) => !isBesideLadder(frame))
   frames.push(...ladder)
   rhythmic.push(...ladder)
   const unique = [...new Set(frames)]
   unique.sort((a, b) => a - b)
   return { frames: unique, ladder, rhythmic, beats }
-}
-
-/** Доли, которые звучат в большинстве шагов отрезка: его повторяющийся рисунок. */
-function steadyPattern(steps: Set<number>[], chain: number[]): Map<number, Set<number>> {
-  const hits = new Map<number, Map<number, number>>()
-  const totals = new Map<number, number>()
-  for (let i = 0; i < steps.length; i++) {
-    const slotCount = slotsInStep(chain[i + 1] - chain[i])
-    totals.set(slotCount, (totals.get(slotCount) ?? 0) + 1)
-    const counts = hits.get(slotCount) ?? new Map<number, number>()
-    for (const slot of steps[i]) counts.set(slot, (counts.get(slot) ?? 0) + 1)
-    hits.set(slotCount, counts)
-  }
-  const pattern = new Map<number, Set<number>>()
-  for (const [slotCount, counts] of hits) {
-    const total = totals.get(slotCount) ?? 1
-    pattern.set(slotCount, new Set([...counts].filter(([, count]) => count / total >= PATTERN_MIN_SHARE).map(([slot]) => slot)))
-  }
-  return pattern
 }
 
 /**
@@ -1045,16 +926,10 @@ function chooseLadderSteps(
   return chosen
 }
 
-/**
- * Обычный шаг: настоящие удары плюс опорные доли, чтобы рука не теряла ритм.
- * Опорная доля ставится, только если на ней что-то звучит: в тихом месте
- * нота без звука непонятна, под что её жать.
- */
+/** Обычный шаг: настоящие удары плюс опорные доли, чтобы рука не теряла ритм. */
 function chooseSlots(
   real: Set<number>,
-  sounding: Set<number>,
   slotCount: number,
-  stride: number,
   difficulty: Difficulty,
   isSoft: boolean,
   isShort: boolean,
@@ -1062,19 +937,16 @@ function chooseSlots(
 ): Set<number> {
   // На коротком шаге все доли дали бы пять нажатий в секунду всю песню подряд
   const isCoarse = isShort || isCalm || difficulty.isEighthsOnly
-  const step = isCoarse ? slotCount / 2 : stride
-  const slots = new Set([...real].filter((slot) => slot % step === 0))
+  const coarseStride = slotCount / 2
+  const slots = new Set([...real].filter((slot) => !isCoarse || slot % coarseStride === 0))
   // На мягком пульсе ударов почти не слышно, поэтому рисунок «тук, ту-тук» держит сам шаг
   if (isSoft && !difficulty.isEighthsOnly) slots.add(Math.round(slotCount * 0.75))
-  const addIfHeard = (slot: number) => {
-    if (isSoft || sounding.has(slot)) slots.add(slot)
-  }
   // Спокойной части хватает опоры на начало шага: иначе она сложнее припева
   if (isCalm) {
-    addIfHeard(0)
+    slots.add(0)
     return slots
   }
-  for (const share of difficulty.pulsePattern) addIfHeard(Math.round(share * slotCount))
+  for (const share of difficulty.pulsePattern) slots.add(Math.round(share * slotCount))
   return slots
 }
 
@@ -1266,7 +1138,7 @@ function addAccents(
   for (let i = 1; i < sections.length; i++) {
     const start = sections[i].start
     // Сила песни сглажена, поэтому сравниваем отрезки чуть в стороне от границы
-    const after = meanOf(intensity, start + SPACE_EDGE_SEC, start + SPACE_EDGE_SEC + SPACE_LOOK_SEC)
+    const after = meanOf(intensity, start + SPACE_EDGE_SEC, start + SPACE_EDGE_SEC + SPACE_AFTER_SEC)
     const before = meanOf(intensity, start - SPACE_EDGE_SEC - SPACE_LOOK_SEC, start - SPACE_EDGE_SEC)
     const rise = after - before
     if (rise >= SPACE_MIN_RISE) candidates.push(nearestImpact(start, impacts))
@@ -1378,10 +1250,4 @@ function spectrumCenter(analysis: AudioAnalysis, frame: number): number {
     sum += value
   }
   return sum === 0 ? 0 : weightedSum / sum
-}
-
-/** Плавный переход от 0 к 1 между двумя порогами. */
-function smoothstep(from: number, to: number, value: number): number {
-  const t = Math.min(1, Math.max(0, (value - from) / (to - from)))
-  return t * t * (3 - 2 * t)
 }
