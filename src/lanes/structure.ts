@@ -68,10 +68,31 @@ const PHRASE_STEPS = 16
 const PHRASE_TOLERANCE_SEC = 0.15
 /** Если событий на сетке блоков меньше, фраз в песне не видно. */
 const PHRASE_MIN_IMPACTS = 3
-/** Песня делится на отрезки, и у каждого свой режим: темп и рисунок внутри песни меняются. */
+/**
+ * Песня делится на отрезки, и у каждого свой режим: темп и рисунок внутри песни меняются.
+ * Отрезки режутся от границ частей песни, а не от начала трека: иначе отрезок
+ * захватывал бы конец припева и начало куплета и играл бы оба одинаково.
+ */
 const PART_SEC = 8
+/**
+ * Граница части: заполненность спектра за несколько секунд после неё заметно
+ * другая, чем до неё. Окно сравнения и самый малый скачок в долях размаха трека.
+ */
+const EDGE_COMPARE_SEC = 3
+const EDGE_MIN_JUMP = 0.3
+const EDGE_MIN_GAP_SEC = 6
+/** Найденная граница уточняется короткими окнами: смена звука занимает доли секунды. */
+const EDGE_REFINE_SEC = 1.5
+const EDGE_SHARP_SEC = 0.4
+const EDGE_SCAN_STEP_SEC = 0.1
 /** Ритм выражен ярко, если настоящих ударов в цепочке не меньше этой доли. */
 const RHYTHM_HIT_SHARE = 0.6
+/**
+ * Отрезок, где сетка сама не нашлась, пробует темп песни. Темп уже известен, ищем
+ * только фазу, поэтому хватает и меньшей доли попаданий: в синкопах дропа удары
+ * часто между долями, но сами доли всё равно звучат.
+ */
+const SONG_TEMPO_HIT_SHARE = 0.45
 const RHYTHM_MIN_HITS = 5
 /** Темп считается темпом песни, если встретился хотя бы в стольких отрезках. */
 const TEMPO_MIN_PARTS = 3
@@ -121,17 +142,19 @@ const BEAT_LOOK_BACK_SEC = 4
  */
 export function songIntensity(analysis: AudioAnalysis): Float32Array {
   const count = analysis.frameCount
-  const prefix = new Float64Array(count + 1)
-  for (let i = 0; i < count; i++) {
-    prefix[i + 1] = prefix[i] + (analysis.bass[i] + analysis.mid[i] + analysis.treble[i]) / 3
-  }
+  const prefix = fillPrefix(analysis)
+  const edges = [0, ...findPartEdges(analysis), count]
 
+  // Среднее не перешагивает границу части: на переходе сила меняется сразу,
+  // а не сползает за несколько секунд до и после него
   const reach = Math.round((INTENSITY_WINDOW_SEC / 2) * analysis.fps)
   const smooth = new Float32Array(count)
-  for (let i = 0; i < count; i++) {
-    const from = Math.max(0, i - reach)
-    const to = Math.min(count, i + reach)
-    smooth[i] = (prefix[to] - prefix[from]) / (to - from)
+  for (let part = 0; part + 1 < edges.length; part++) {
+    for (let i = edges[part]; i < edges[part + 1]; i++) {
+      const from = Math.max(edges[part], i - reach)
+      const to = Math.min(edges[part + 1], i + reach)
+      smooth[i] = (prefix[to] - prefix[from]) / Math.max(1, to - from)
+    }
   }
 
   const low = percentile(smooth, 0.1)
@@ -140,6 +163,96 @@ export function songIntensity(analysis: AudioAnalysis): Float32Array {
   const curve = new Float32Array(count)
   for (let i = 0; i < count; i++) curve[i] = Math.min(1, Math.max(0, (smooth[i] - low) / range))
   return curve
+}
+
+/** Накопленная заполненность спектра: среднее на любом отрезке за одно вычитание. */
+function fillPrefix(analysis: AudioAnalysis): Float64Array {
+  const prefix = new Float64Array(analysis.frameCount + 1)
+  for (let i = 0; i < analysis.frameCount; i++) {
+    prefix[i + 1] = prefix[i] + (analysis.bass[i] + analysis.mid[i] + analysis.treble[i]) / 3
+  }
+  return prefix
+}
+
+const edgeCache = new WeakMap<AudioAnalysis, number[]>()
+
+/**
+ * Границы частей песни, в кадрах: места, где звук резко становится плотнее или
+ * проще. Сначала ищем их грубо, сравнивая по три секунды до и после, затем
+ * уточняем короткими окнами: так граница встаёт на сам переход, а не рядом.
+ */
+export function findPartEdges(analysis: AudioAnalysis): number[] {
+  const cached = edgeCache.get(analysis)
+  if (cached) return cached
+  const fps = analysis.fps
+  const count = analysis.frameCount
+  const prefix = fillPrefix(analysis)
+  const mean = (from: number, to: number) => {
+    const a = Math.max(0, from)
+    const b = Math.min(count, to)
+    return b <= a ? 0 : (prefix[b] - prefix[a]) / (b - a)
+  }
+  // Размах трека по секундным средним: скачок меряется относительно него
+  const second = Math.round(fps)
+  const levels = new Float32Array(Math.max(1, Math.floor(count / second)))
+  for (let i = 0; i < levels.length; i++) levels[i] = mean(i * second, (i + 1) * second)
+  const range = Math.max(percentile(levels, 0.9) - percentile(levels, 0.1), 0.001)
+
+  const reach = Math.round(EDGE_COMPARE_SEC * fps)
+  const step = Math.max(1, Math.round(EDGE_SCAN_STEP_SEC * fps))
+  const jumps: { frame: number; jump: number }[] = []
+  for (let frame = reach; frame < count - reach; frame += step) {
+    jumps.push({ frame, jump: Math.abs(mean(frame, frame + reach) - mean(frame - reach, frame)) / range })
+  }
+  const candidates = jumps.filter(
+    (point, i) =>
+      point.jump >= EDGE_MIN_JUMP &&
+      (i === 0 || point.jump >= jumps[i - 1].jump) &&
+      (i === jumps.length - 1 || point.jump > jumps[i + 1].jump),
+  )
+  candidates.sort((a, b) => b.jump - a.jump)
+
+  const edges: number[] = []
+  const minGap = EDGE_MIN_GAP_SEC * fps
+  for (const candidate of candidates) {
+    if (edges.some((edge) => Math.abs(edge - candidate.frame) < minGap)) continue
+    edges.push(refineEdge(candidate.frame, mean, fps, count))
+  }
+  edges.sort((a, b) => a - b)
+  edgeCache.set(analysis, edges)
+  return edges
+}
+
+/** Самая резкая перемена звука рядом с грубой границей. */
+function refineEdge(frame: number, mean: (from: number, to: number) => number, fps: number, count: number): number {
+  const sharp = Math.round(EDGE_SHARP_SEC * fps)
+  const reach = Math.round(EDGE_REFINE_SEC * fps)
+  const direction = Math.sign(mean(frame, frame + sharp * 4) - mean(frame - sharp * 4, frame))
+  let best = frame
+  let bestJump = -Infinity
+  for (let candidate = Math.max(sharp, frame - reach); candidate <= Math.min(count - sharp, frame + reach); candidate++) {
+    // Только перемена в ту же сторону: иначе граница прилипла бы к случайному удару
+    const jump = direction * (mean(candidate, candidate + sharp) - mean(candidate - sharp, candidate))
+    if (jump > bestJump) {
+      bestJump = jump
+      best = candidate
+    }
+  }
+  return best
+}
+
+/** Отрезки песни: части между границами, длинные части порезаны на куски около PART_SEC. */
+function partRanges(analysis: AudioAnalysis): { start: number; end: number }[] {
+  const edges = [0, ...findPartEdges(analysis).map((frame) => frame / analysis.fps), analysis.duration]
+  const ranges: { start: number; end: number }[] = []
+  for (let i = 0; i + 1 < edges.length; i++) {
+    const length = edges[i + 1] - edges[i]
+    const pieces = Math.max(1, Math.round(length / PART_SEC))
+    for (let piece = 0; piece < pieces; piece++) {
+      ranges.push({ start: edges[i] + (length * piece) / pieces, end: edges[i] + (length * (piece + 1)) / pieces })
+    }
+  }
+  return ranges
 }
 
 /** Крупная часть песни: вступление, куплет, бридж, припев. */
@@ -310,8 +423,7 @@ export interface SongPart {
  */
 export function findSongParts(analysis: AudioAnalysis, sustains: Moment[], softPulses: number[]): SongPart[] {
   const parts: SongPart[] = []
-  for (let start = 0; start < analysis.duration; start += PART_SEC) {
-    const end = Math.min(analysis.duration, start + PART_SEC)
+  for (const { start, end } of partRanges(analysis)) {
     const isBusy = sustains.some((sustain) => sustain.start < end && sustain.end > start)
     const hasPulse = softPulses.some((time) => time >= start && time < end)
     // Удары в низах держат темп в тяжёлой музыке, где общий детектор слышит мало
@@ -326,7 +438,48 @@ export function findSongParts(analysis: AudioAnalysis, sustains: Moment[], softP
     const isClear = chain.length > 0 && hits / chain.length >= RHYTHM_HIT_SHARE
     parts.push({ start, end, chain: isClear ? longEnoughStep(chain) : [] })
   }
-  return keepSteadyTempo(parts)
+  return withSongTempo(analysis, keepSteadyTempo(parts), sustains, softPulses)
+}
+
+/**
+ * Темп песни один на всю песню. Если отрезок не нашёл сетку сам, а соседние нашли,
+ * идём тем же шагом и подбираем фазу по ударам этого отрезка. Иначе стиль менялся бы
+ * каждые восемь секунд: то ровная сетка, то россыпь по отдельным звукам.
+ */
+function withSongTempo(analysis: AudioAnalysis, parts: SongPart[], sustains: Moment[], softPulses: number[]): SongPart[] {
+  const steps = parts.filter((part) => part.chain.length > 1).map((part) => chainStep(part.chain))
+  if (steps.length === 0) return parts
+  // Самый частый шаг: у него больше всего близнецов
+  let songStep = steps[0]
+  let bestTwins = 0
+  for (const step of steps) {
+    const twins = steps.filter((other) => isSameStep(other, step)).length
+    if (twins > bestTwins) {
+      bestTwins = twins
+      songStep = step
+    }
+  }
+  const all = [...analysis.onsetTimes, ...analysis.lowOnsetTimes].sort((a, b) => a - b)
+  return parts.map((part) => {
+    if (part.chain.length > 1) return part
+    const isBusy = sustains.some((sustain) => sustain.start < part.end && sustain.end > part.start)
+    const hasPulse = softPulses.some((time) => time >= part.start && time < part.end)
+    if (isBusy || hasPulse) return part
+    const peaks = all.filter((time) => time >= part.start && time < part.end)
+    let best: number[] = []
+    let bestHits = 0
+    for (const start of peaks) {
+      if (start - part.start > songStep) break
+      const chain = walkChain(peaks, start, songStep).filter((time) => time < part.end)
+      const hits = chain.filter((time) => peaks.includes(time)).length
+      if (hits > bestHits) {
+        best = chain
+        bestHits = hits
+      }
+    }
+    const isClear = bestHits >= RHYTHM_MIN_HITS && bestHits / best.length >= SONG_TEMPO_HIT_SHARE
+    return isClear ? { ...part, chain: longEnoughStep(best) } : part
+  })
 }
 
 /** Шаг цепочки в секундах. */

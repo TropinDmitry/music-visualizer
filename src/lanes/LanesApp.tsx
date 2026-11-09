@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerE
 import type { AudioAnalysis } from '../audio/analyzer.ts'
 import { AudioPlayer } from '../audio/AudioPlayer.ts'
 import { createEmptyFeatures, sampleFeatures } from '../audio/frameFeatures.ts'
-import { audioBufferToMono, createDemoBuffer, decodeAudioFile } from '../audio/loadAudio.ts'
+import { MAX_MEDIA_SEC, audioBufferToMono, createDemoBuffer, decodeAudioFile, readMediaDuration } from '../audio/loadAudio.ts'
 import { runAnalysisInWorker } from '../audio/runAnalysis.ts'
 import { formatTime } from '../formatting.ts'
 import { CLIP_LOOKS, LaneScene, type ClipLook } from './LaneScene.ts'
@@ -705,6 +705,16 @@ export function LanesApp() {
   }
 
   const attachClip = (file: File) => {
+    void readMediaDuration(file).then((duration) => {
+      if (duration !== null && duration > MAX_MEDIA_SEC) {
+        setStatus(text.tooLong)
+        return
+      }
+      showClip(file)
+    })
+  }
+
+  const showClip = (file: File) => {
     if (clipUrl) URL.revokeObjectURL(clipUrl)
     setClipUrl(URL.createObjectURL(file))
     setClipName(file.name)
@@ -750,10 +760,20 @@ export function LanesApp() {
   const handleTrackFile = async (file: File) => {
     setStatus(text.reading)
     try {
+      // Длину проверяем до декодирования: распаковка часового файла сама заняла бы минуты
+      const declared = await readMediaDuration(file)
+      if (declared !== null && declared > MAX_MEDIA_SEC) {
+        setStatus(text.tooLong)
+        return
+      }
       const buffer = await decodeAudioFile(file, getPlayer().context)
+      if (buffer.duration > MAX_MEDIA_SEC) {
+        setStatus(text.tooLong)
+        return
+      }
       clearClip()
       await loadBuffer(buffer, file.name)
-      if (file.type.startsWith('video/')) attachClip(file) // клип сразу и звук, и картинка
+      if (file.type.startsWith('video/')) showClip(file) // клип сразу и звук, и картинка
     } catch (error) {
       console.error(error)
       setStatus(text.readError)

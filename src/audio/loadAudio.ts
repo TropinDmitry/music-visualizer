@@ -1,5 +1,28 @@
 import { synthesizeDemoTrack } from './demoTrack.ts'
 
+/** Длиннее этого файлы не берём: анализ занял бы минуты, а уровень был бы на полчаса. */
+export const MAX_MEDIA_SEC = 600
+
+/**
+ * Длительность файла по его заголовку, без декодирования: браузер читает только
+ * начало файла. Если браузер файл не понимает, возвращает null.
+ */
+export function readMediaDuration(file: Blob): Promise<number | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file)
+    const media = document.createElement(file.type.startsWith('video/') ? 'video' : 'audio')
+    const finish = (duration: number | null) => {
+      URL.revokeObjectURL(url)
+      media.removeAttribute('src')
+      resolve(duration)
+    }
+    media.preload = 'metadata'
+    media.onloadedmetadata = () => finish(Number.isFinite(media.duration) ? media.duration : null)
+    media.onerror = () => finish(null)
+    media.src = url
+  })
+}
+
 /** Декодирует файл (mp3, wav, ogg — что умеет браузер) в AudioBuffer. */
 export async function decodeAudioFile(file: Blob, context: AudioContext): Promise<AudioBuffer> {
   const bytes = await file.arrayBuffer()

@@ -147,20 +147,28 @@ const LADDER_SOUND_SHARE = 0.5
  */
 const PLAIN_MIN_GAP_SEC = 0.18
 /**
+ * Музыка повторяет рисунок такт за тактом, и ноты тоже должны. Доля отрезка
+ * ставится в рисунок, если звучит хотя бы в стольких его шагах; удар, который
+ * детектор услышал в одном такте и не услышал в соседних, нотой не становится.
+ */
+const PATTERN_MIN_SHARE = 0.5
+/** Обычная нота ближе этого к ноте лесенки лишняя. */
+const LADDER_NEIGHBOUR_SEC = 0.1
+/** Насколько звук может отстоять от доли, чтобы нота всё равно встала ровно на долю. */
+const GRID_SNAP_SEC = 0.035
+/**
  * Самый короткий промежуток между нотами в спокойной части. Когда музыка простая,
  * пара нот вплотную непонятна и не успевается; к мощной части предел плавно
  * спадает до предела сложности. Лесенок и читки это не касается.
  */
 const CALM_MIN_GAP_SEC = 0.3
 /**
- * Пианино звучит в полосе голоса, и его ноты похожи на слоги. Но у инструмента
- * высота чистая: «слоги» совпадают с ясными нотами мелодии. В читке Rap God,
- * Look At Me Now и Lollipop средняя ясность совпавших нот не выше 3,3, у пианино
- * в L's Ideology от 4,3. Совпадение ищем в пределах этого окна, в секундах.
+ * Читка бывает только в песне, где её много. В Rap God и Look At Me Now быстрые слоги
+ * идут на 58–59% песни, а в Levels, Painkiller, Stargazing и L's Ideology не больше чем
+ * на 14%: там это синтезатор, гитара или пианино в полосе голоса, и ноты на каждый
+ * такой «слог» сыпались бы невпопад. Доля песни, начиная с которой читка настоящая.
  */
-const TONAL_MATCH_SEC = 0.06
-const TONAL_MIN_SHARE = 0.4
-const TONAL_MIN_CLARITY = 3.8
+const READING_SONG_SHARE = 0.3
 /** Ноты дальше этого уже не одна серия пальцев. */
 const ROLL_MAX_GAP_SEC = 0.5
 /** Рисунки пальцев: круги в обе стороны, зигзаги и возвраты к одной дорожке. */
@@ -223,6 +231,8 @@ const ARROW_CONTRAST_SEC = 0.5
 const ARROW_CONTRAST_FLOOR = 0.02
 /** Совсем вплотную к стрелке обычную ноту не сыграть: руке надо перейти на стрелки. */
 const ARROW_CLEAR_SEC = 0.12
+/** Сколько стрелок подряд в спокойной части. */
+const CALM_ARROW_RUN = 2
 /** Парные ноты на смене ритма не чаще этого: иначе акценты теряют вес. */
 const MIN_ACCENT_GAP_SEC = 12
 /** Смену части ищем рядом с найденным событием, чтобы попасть в реальный удар. */
@@ -322,7 +332,7 @@ export function generateLaneLevel(
   markLastNotesBeforePauses(notes, moments)
   const sections = findSections(analysis, intensity)
   const phraseEnds = focus === 'voice' ? [] : findPhraseEnds(analysis, [...softChains, ...chains], moments)
-  const withArrows = placeArrowAccents(notes, analysis, difficulty, phraseEnds, sustains, moments)
+  const withArrows = placeArrowAccents(notes, analysis, difficulty, phraseEnds, sustains, moments, intensity)
   // Быструю читку не разбиваем парами и лучами: это один поток слогов
   const ladderFrames = new Set([...ladder, ...syllables])
   const isLadder = (note: LaneNote) => ladderFrames.has(Math.round(note.time * analysis.fps))
@@ -354,6 +364,7 @@ function placeArrowAccents(
   phraseEnds: number[],
   sustains: Moment[],
   moments: Moment[],
+  intensity: Float32Array,
 ): LaneNote[] {
   const strengthOf = (note: LaneNote) => {
     const frame = Math.round(note.time * analysis.fps)
@@ -400,9 +411,14 @@ function placeArrowAccents(
     candidates.sort((a, b) => strengthOf(b) - strengthOf(a))
     const strongest = strengthOf(candidates[0])
 
+    // Длинная серия стрелок это нагрузка мощной части, в спокойной хватает двух.
+    // Одной мало: первый удар после тишины часто забирает пробел, и стрелка пропала бы
+    const power = smoothstep(CALM_LEVEL, ACTIVE_LEVEL, intensityAt(intensity, candidates[0].time, analysis.fps))
+    const calmRun = Math.min(CALM_ARROW_RUN, difficulty.arrowRun)
+    const run = Math.round(calmRun + (difficulty.arrowRun - calmRun) * power)
     const chosen: LaneNote[] = []
     for (const note of candidates) {
-      if (chosen.length >= difficulty.arrowRun || strengthOf(note) < strongest * ARROW_STRONG_SHARE) break
+      if (chosen.length >= run || strengthOf(note) < strongest * ARROW_STRONG_SHARE) break
       if (chosen.every((other) => Math.abs(other.time - note.time) >= ARROW_MIN_SPACING_SEC)) chosen.push(note)
     }
     for (const note of chosen) arrows.add(note)
@@ -771,6 +787,7 @@ function findReadingSpans(
 ): { start: number; end: number }[] {
   if (focus === 'beat') return []
   if (focus === 'voice') return [{ start: 0, end: analysis.duration }]
+  if (readingShare(analysis) < READING_SONG_SHARE) return []
 
   const spans: { start: number; end: number }[] = []
   const half = READING_WINDOW_SEC / 2
@@ -778,7 +795,6 @@ function findReadingSpans(
     const count = analysis.syllableTimes.filter((time) => time >= center - half && time < center + half).length
     const isHeld = sustains.some((sustain) => sustain.start < center && sustain.end > center)
     if (isHeld || count / READING_WINDOW_SEC < READING_MIN_RATE) continue
-    if (isPlayedMelody(analysis, center - half, center + half)) continue
     const start = center - READING_STEP_SEC / 2
     const last = spans[spans.length - 1]
     // Короткий провал посреди читки её не прерывает: это вдох, а не конец куплета
@@ -788,27 +804,17 @@ function findReadingSpans(
   return spans.filter((span) => span.end - span.start >= READING_MIN_SEC)
 }
 
-/** Звуки в окне это ноты инструмента, а не слоги: большинство совпадает с ясной мелодией. */
-function isPlayedMelody(analysis: AudioAnalysis, from: number, to: number): boolean {
-  const { noteTimes, noteStrengths } = analysis.melody
-  const syllables = analysis.syllableTimes.filter((time) => time >= from && time < to)
-  let matched = 0
-  let clarity = 0
-  for (const time of syllables) {
-    // Первая нота не раньше окна совпадения: список нот идёт по времени
-    let low = 0
-    let high = noteTimes.length
-    while (low < high) {
-      const middle = (low + high) >> 1
-      if (noteTimes[middle] <= time - TONAL_MATCH_SEC) low = middle + 1
-      else high = middle
-    }
-    const best = low
-    if (best >= noteTimes.length || noteTimes[best] >= time + TONAL_MATCH_SEC) continue
-    matched += 1
-    clarity += noteStrengths[best]
+/** Доля песни, где слоги идут быстрее порога читки. */
+function readingShare(analysis: AudioAnalysis): number {
+  const half = READING_WINDOW_SEC / 2
+  let fast = 0
+  let total = 0
+  for (let center = half; center < analysis.duration - half; center += READING_STEP_SEC) {
+    const count = analysis.syllableTimes.filter((time) => time >= center - half && time < center + half).length
+    total += 1
+    if (count / READING_WINDOW_SEC >= READING_MIN_RATE) fast += 1
   }
-  return matched > 0 && matched / syllables.length >= TONAL_MIN_SHARE && clarity / matched >= TONAL_MIN_CLARITY
+  return total === 0 ? 0 : fast / total
 }
 
 /**
@@ -898,17 +904,19 @@ function arrangeRhythm(
         const slot = Math.round(position)
         if (slot < 0 || slot >= slotCount) continue
         sounding.add(slot)
-        if (usable && !usable.has(frame)) continue
-        slots.add(slot)
+        // Ближайший к доле звук: на него встанет нота, если сетка от звука ушла
         const known = real.get(slot)
         const isCloser = known === undefined || Math.abs(position - slot) < Math.abs((known / fps - chain[i]) / slotSec - slot)
         if (isCloser) real.set(slot, frame)
+        if (usable && !usable.has(frame)) continue
+        slots.add(slot)
       }
       steps.push(slots)
       soundingSteps.push(sounding)
       realFrames.push(real)
     }
 
+    const pattern = steadyPattern(steps, chain)
     const first = chain[0] - PULSE_EDGE_SEC
     const last = chain[chain.length - 1]
     frames = frames.filter((frame) => frame / fps < first || frame / fps >= last)
@@ -951,21 +959,49 @@ function arrangeRhythm(
       const isShort = chain[i + 1] - chain[i] < SHORT_STEP_SEC
       const isCalm = intensityAt(intensity, chain[i], fps) < CALM_LEVEL
       const stride = slotSec < PLAIN_MIN_GAP_SEC ? 2 : 1
-      for (const slot of chooseSlots(steps[i], soundingSteps[i], slotCount, stride, difficulty, isSoft, isShort, isCalm)) {
+      const steady = new Set([...steps[i]].filter((slot) => pattern.get(slotCount)?.has(slot)))
+      for (const slot of chooseSlots(steady, soundingSteps[i], slotCount, stride, difficulty, isSoft, isShort, isCalm)) {
         if (isLadder && slot >= ladderFrom && slot <= ladderTo) continue
-        // Нота встаёт на сам звук, а не на расчётную долю: живой темп дышит, и сетка от него уходит
-        const frame = realFrames[i].get(slot) ?? toFrame(slot)
+        // Звук рядом с долей встаёт ровно на долю: так рисунок ровный. Если живой темп
+        // увёл звук от сетки дальше, нота идёт за звуком
+        const real = realFrames[i].get(slot)
+        const isOffGrid = real !== undefined && Math.abs(real - toFrame(slot)) > GRID_SNAP_SEC * fps
+        const frame = isOffGrid ? real : toFrame(slot)
         frames.push(frame)
         rhythmic.push(frame)
       }
     }
   }
 
+  // Лесенка идёт ровно по сетке, а обычная нота стоит на самом звуке: рядом с лесенкой
+  // она дала бы вторую ноту через пару сотых секунды
+  const ladderGap = LADDER_NEIGHBOUR_SEC * fps
+  const isBesideLadder = (frame: number) => ladder.some((step) => Math.abs(step - frame) < ladderGap)
+  frames = frames.filter((frame) => !isBesideLadder(frame))
   frames.push(...ladder)
   rhythmic.push(...ladder)
   const unique = [...new Set(frames)]
   unique.sort((a, b) => a - b)
   return { frames: unique, ladder, rhythmic, beats }
+}
+
+/** Доли, которые звучат в большинстве шагов отрезка: его повторяющийся рисунок. */
+function steadyPattern(steps: Set<number>[], chain: number[]): Map<number, Set<number>> {
+  const hits = new Map<number, Map<number, number>>()
+  const totals = new Map<number, number>()
+  for (let i = 0; i < steps.length; i++) {
+    const slotCount = slotsInStep(chain[i + 1] - chain[i])
+    totals.set(slotCount, (totals.get(slotCount) ?? 0) + 1)
+    const counts = hits.get(slotCount) ?? new Map<number, number>()
+    for (const slot of steps[i]) counts.set(slot, (counts.get(slot) ?? 0) + 1)
+    hits.set(slotCount, counts)
+  }
+  const pattern = new Map<number, Set<number>>()
+  for (const [slotCount, counts] of hits) {
+    const total = totals.get(slotCount) ?? 1
+    pattern.set(slotCount, new Set([...counts].filter(([, count]) => count / total >= PATTERN_MIN_SHARE).map(([slot]) => slot)))
+  }
+  return pattern
 }
 
 /**
