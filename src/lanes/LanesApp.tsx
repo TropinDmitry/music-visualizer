@@ -287,6 +287,10 @@ export function LanesApp() {
   const [isStarHintShown, setIsStarHintShown] = useState(false)
   const hasStarHintRef = useRef(false)
   const [feverBoost, setFeverBoost] = useState<{ id: number; seconds: number } | null>(null)
+  /** Вспышки по центру, которые улетают в панель: начало Fever и новый множитель. */
+  const [feverBurst, setFeverBurst] = useState<number | null>(null)
+  const [multiplierBurst, setMultiplierBurst] = useState<{ id: number; value: number } | null>(null)
+  const wasFeverRef = useRef(false)
   const [result, setResult] = useState<GameResult | null>(null)
   const [settings, setSettings] = useState<Settings>({
     difficulty: 'normal',
@@ -428,8 +432,9 @@ export function LanesApp() {
         sounds?.milestone()
       }
       if (event.startedOverdrive) {
-        showBanner(words.fever, words.feverDetail, false)
-        sounds?.milestone()
+        nextIdRef.current += 1
+        setFeverBurst(nextIdRef.current)
+        sounds?.feverStart()
       }
       if (event.extendedOverdrive) {
         nextIdRef.current += 1
@@ -448,7 +453,11 @@ export function LanesApp() {
       const game = gameRef.current
       if (game) {
         const currentMultiplier = multiplier(game)
-        if (currentMultiplier > lastMultiplierRef.current) sounds?.multiplierUp(currentMultiplier)
+        if (currentMultiplier > lastMultiplierRef.current) {
+          sounds?.multiplierUp(currentMultiplier)
+          nextIdRef.current += 1
+          setMultiplierBurst({ id: nextIdRef.current, value: currentMultiplier })
+        }
         // Множитель сбит: игрок должен заметить потерю, иначе ошибка проходит незаметно
         if (currentMultiplier < lastMultiplierRef.current && lastMultiplierRef.current >= 2) {
           setLostMultiplier({ id: nextIdRef.current + 1, from: lastMultiplierRef.current })
@@ -516,6 +525,10 @@ export function LanesApp() {
         scene.setHueShift(canDrift ? songProgress * COLOR_DRIFT_RADIANS : 0)
         applyMoments(time, clockTime)
         scene.setTrackColor(sectionColor(sectionsRef.current, time, palette))
+        // Конец Fever слышен: иначе бонус пропадает незаметно
+        const isFever = isOverdrive(game, time)
+        if (wasFeverRef.current && !isFever) soundsRef.current?.feverEnd()
+        wasFeverRef.current = isFever
         // Сила серии растёт с уровнем, а не с каждой нотой: так шаги заметны
         const tierCount = STREAK_TIERS.length - 1
         scene.setStreak((streakTier(game.combo) + streakProgress(game.combo) * 0.5) / tierCount, isOverdrive(game, time))
@@ -811,6 +824,9 @@ export function LanesApp() {
     setBanner(null)
     setPopups([])
     setFeverBoost(null)
+    setFeverBurst(null)
+    setMultiplierBurst(null)
+    wasFeverRef.current = false
     setIsStarHintShown(false)
     hasStarHintRef.current = false
     player.setVolume(settings.volume)
@@ -913,6 +929,8 @@ export function LanesApp() {
             <span className="score-time">
               {formatTime(hud.time)} / {formatTime(duration)}
             </span>
+            {/* Пока идёт Fever, у счёта видно, почему очки растут быстрее */}
+            {hud.isOverdrive && <span className="fever-badge">×2 {text.fever}</span>}
             {hud.streakTier > 0 && (
               <div className="streak-meter" key={hud.streakTier}>
                 <strong>{text.streak(STREAK_TIERS[hud.streakTier].from)}</strong>
@@ -972,6 +990,39 @@ export function LanesApp() {
               <div style={{ width: `${hud.energy * 100}%` }} />
             </div>
           </div>
+
+          {feverBurst !== null && (
+            <div
+              className="fever-burst"
+              key={feverBurst}
+              onAnimationEnd={(event) => {
+                if (event.target === event.currentTarget) setFeverBurst(null)
+              }}
+            >
+              <div className="fever-flash" />
+              <div className="fever-stars">
+                {[-1, 0, 1].map((side) => (
+                  <span key={side} style={{ '--side': side } as CSSProperties}>
+                    ★
+                  </span>
+                ))}
+              </div>
+              <strong>{text.fever}</strong>
+              <small>{text.feverDetail}</small>
+            </div>
+          )}
+
+          {multiplierBurst && (
+            <div
+              className="multiplier-burst"
+              key={multiplierBurst.id}
+              onAnimationEnd={(event) => {
+                if (event.target === event.currentTarget) setMultiplierBurst(null)
+              }}
+            >
+              ×{multiplierBurst.value}
+            </div>
+          )}
 
           {banner && (
             <div className={`banner ${banner.isWarning ? 'is-warning' : ''}`} key={banner.id}>

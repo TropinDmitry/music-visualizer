@@ -3,10 +3,11 @@ import type { SoundEffects } from "./sounds.ts";
 
 const FIRST_STAR_MS = 550;
 const STAR_STEP_MS = 480;
-const BURST_STEP_MS = 380;
-const BURST_COUNT = 4;
-const SPARKS_PER_BURST = 22;
-const BURST_HUES = [186, 268, 316, 48];
+/** Салют за идеальную партию: частые крупные хлопки, первый сразу с третьей звездой. */
+const BURST_STEP_MS = 230;
+const BURST_COUNT = 8;
+const SPARKS_PER_BURST = 30;
+const BURST_HUES = [48, 186, 316, 268, 48, 140, 316, 186];
 
 interface Burst {
   x: number;
@@ -17,7 +18,8 @@ interface Burst {
 
 /**
  * Звёзды итогов появляются по одной, каждая со своей нотой выше прошлой.
- * За партию без промахов последняя звезда звенит ярче, и над ней хлопает салют.
+ * Если звёзд три, на третьей все три вспыхивают вместе и звенит аккорд.
+ * За партию без промахов поверх хлопает громкий салют.
  */
 export function ResultStars({
   stars,
@@ -43,14 +45,14 @@ export function ResultStars({
           () => {
             setShown(index + 1);
             if (index < stars)
-              sounds.current?.resultStar(index, isFlawless && index === 2);
+              sounds.current?.resultStar(index, stars === 3 && index === 2);
           },
           FIRST_STAR_MS + index * STAR_STEP_MS,
         ),
       );
     }
     if (isFlawless) {
-      const fireworksAt = FIRST_STAR_MS + 3 * STAR_STEP_MS;
+      const fireworksAt = FIRST_STAR_MS + 2 * STAR_STEP_MS + 120;
       for (let index = 0; index < BURST_COUNT; index++) {
         timers.push(
           window.setTimeout(
@@ -75,7 +77,8 @@ export function ResultStars({
             className={[
               index < shown ? "is-shown" : "",
               index < shown && index < stars ? "is-earned" : "",
-              index < shown && isFlawless && index === 2 ? "is-flawless" : "",
+              // Три звезды из трёх: светятся все, когда легла последняя
+              stars === 3 && shown === 3 ? "is-flawless" : "",
             ].join(" ")}
           >
             ★
@@ -120,14 +123,14 @@ function createBursts(): Burst[] {
     for (let spark = 0; spark < SPARKS_PER_BURST; spark++) {
       sparks.push({
         angle: (spark / SPARKS_PER_BURST) * 360 + Math.random() * 10,
-        distance: 70 + Math.random() * 60,
+        distance: 110 + Math.random() * 110,
       });
     }
     // Хлопки по сторонам от звёзд, чтобы не закрывать их
     const side = index % 2 === 0 ? -1 : 1;
     bursts.push({
-      x: 50 + side * (18 + Math.random() * 20),
-      y: 15 + Math.random() * 45,
+      x: 50 + side * (16 + Math.random() * 30),
+      y: 5 + Math.random() * 60,
       hue: BURST_HUES[index],
       sparks,
     });
