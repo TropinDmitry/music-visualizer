@@ -13,6 +13,7 @@ import {
   SWIPE_EARLY_SEC,
   SWIPE_LATE_SEC,
   MISS_WARNING_STREAK,
+  multiplier,
   multiplierProgress,
   playAutopilot,
   isOverdrive,
@@ -680,7 +681,24 @@ describe('правила', () => {
       if (event && event.milestone) milestones.push(event.milestone)
     }
     expect(milestones).toEqual([10])
-    expect(multiplierProgress(game)).toBeCloseTo(0.1)
+    expect(multiplierProgress(game)).toBeCloseTo(11 / 20)
+  })
+
+  it('множитель идёт ступенями ×2 ×4 ×6 ×8, и каждая дороже прошлой', () => {
+    const game = createLaneGame(tapRow(210), easy)
+    const reached = new Map<number, number>()
+    for (let i = 0; i < 210; i++) {
+      pressLane(game, i + 1, 0)
+      const value = multiplier(game)
+      if (!reached.has(value)) reached.set(value, game.combo)
+    }
+    expect([...reached]).toEqual([
+      [1, 1],
+      [2, 20],
+      [4, 60],
+      [6, 120],
+      [8, 200],
+    ])
   })
 
   it('предупреждение срабатывает один раз за серию промахов и сбрасывается попаданием', () => {

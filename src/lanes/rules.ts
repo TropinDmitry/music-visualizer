@@ -33,8 +33,18 @@ const HOLD_DONE_POINTS = 200
 /** Отпустить можно чуть раньше конца луча: точность до кадра здесь не нужна. */
 const HOLD_RELEASE_GRACE_SEC = 0.15
 const ENERGY_LOSS_HOLD_BROKEN = 0.05
-const MAX_MULTIPLIER = 8
-const COMBO_PER_MULTIPLIER = 10
+/**
+ * Ступени множителя: ×2, ×4, ×6, ×8. Каждая следующая дороже прошлой на 20 попаданий
+ * подряд: до ×2 нужно 20, до ×4 ещё 40, до ×6 ещё 60, до ×8 ещё 80. Высокий
+ * множитель это награда за долгую чистую игру, а не за пару удачных тактов.
+ */
+export const MULTIPLIER_STEPS = [
+  { value: 1, combo: 0 },
+  { value: 2, combo: 20 },
+  { value: 4, combo: 60 },
+  { value: 6, combo: 120 },
+  { value: 8, combo: 200 },
+]
 const ENERGY_LOSS_MISS = 0.07
 const ENERGY_GAIN_HIT = 0.012
 /** На этих значениях комбо игра хвалит игрока. */
@@ -342,14 +352,23 @@ export function playAutopilot(game: LaneGame, time: number): LaneEvent[] {
   return events
 }
 
+/** Номер текущей ступени множителя в MULTIPLIER_STEPS. */
+function multiplierStep(game: LaneGame): number {
+  let step = 0
+  while (step + 1 < MULTIPLIER_STEPS.length && game.combo >= MULTIPLIER_STEPS[step + 1].combo) step += 1
+  return step
+}
+
 export function multiplier(game: LaneGame): number {
-  return Math.min(MAX_MULTIPLIER, 1 + Math.floor(game.combo / COMBO_PER_MULTIPLIER))
+  return MULTIPLIER_STEPS[multiplierStep(game)].value
 }
 
 /** Заполнение шкалы до следующего множителя, 0..1. На максимуме шкала полная. */
 export function multiplierProgress(game: LaneGame): number {
-  if (multiplier(game) === MAX_MULTIPLIER) return 1
-  return (game.combo % COMBO_PER_MULTIPLIER) / COMBO_PER_MULTIPLIER
+  const step = multiplierStep(game)
+  if (step + 1 >= MULTIPLIER_STEPS.length) return 1
+  const from = MULTIPLIER_STEPS[step].combo
+  return (game.combo - from) / (MULTIPLIER_STEPS[step + 1].combo - from)
 }
 
 export function accuracy(game: LaneGame): number {
