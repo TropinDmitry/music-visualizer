@@ -108,6 +108,16 @@ const SPACE_TRIMMED_HOLD_MIN_SEC = 0.5
 /** Луч на доле: такая часть шага, как в живой игре. */
 const BEAT_HOLD_SHARE = 0.8
 const BEAT_HOLD_REST_SEC = 0.5
+/**
+ * Луч на доле держит протяжный звук. Если внутри него отдельные звуки идут
+ * не реже RIFF_MIN_RATE в секунду, это рифф, как в разгоне Levels около 50-й
+ * секунды, и он играется нотами. Под двойным лучом на 72-й секунде звуков около
+ * двух в секунду, он остаётся. Звуки у самого начала луча не считаются: это удар,
+ * с которого луч начался.
+ */
+const BEAT_HOLD_MAX_HITS = 2
+const RIFF_MIN_RATE = 3
+const HOLD_INNER_MARGIN_SEC = 0.08
 const SWELL_LOOK_FRAMES = 20
 const SWELL_RATIO = 1.25
 const TRIPLE_WINDOW_SEC = 0.9
@@ -141,6 +151,22 @@ const ACTIVE_LEVEL = 0.6
 const LADDER_MIN_HITS = 2
 /** Ноты дальше этого уже не одна серия пальцев. */
 const ROLL_MAX_GAP_SEC = 0.5
+/**
+ * Такт считается повтором прежнего, если похож на него не меньше этого и по ударам,
+ * и по тембру. При таком пороге в L's Ideology, построенном на петлях, повторов 85%,
+ * в Levels и Lollipop около половины, а в оркестровом Somnus 14%.
+ */
+const REPEAT_MIN_SIMILARITY = 0.93
+const REPEAT_LENGTH_TOLERANCE = 0.03
+/** Во сколько раз громкость повтора может отличаться от образца. */
+const REPEAT_LOUDNESS_RATIO = 1.15
+const REPEAT_SLOTS = 16
+/** Число нот в образце и в самом такте должно отличаться не больше чем в 1/0,8 раза. */
+const REPEAT_MIN_KEEP = 0.8
+/** Образец может заходить в начало повтора на столько: соседние такты делят границу. */
+const REPEAT_EDGE_SLACK_SEC = 0.05
+/** Сколько должна продержаться новая высота, чтобы считаться нотой риффа. */
+const PITCH_CHANGE_HOLD_SEC = 0.08
 /** Рисунки пальцев: круги в обе стороны, зигзаги и возвраты к одной дорожке. */
 const ROLL_MOTIFS = [
   [0, 1, 2],
@@ -195,6 +221,8 @@ const ARROW_SEARCH_SEC = 3
 const ARROW_SEARCH_AFTER_SEC = 0.5
 /** Стрелкой становится удар не слабее этой доли самого сильного в окне. */
 const ARROW_STRONG_SHARE = 0.5
+/** Насколько дорожка, с которой стрелки шли чаще, проигрывает в выборе. */
+const ARROW_SAME_LANE_PENALTY = 0.6
 const ARROW_MIN_SPACING_SEC = 0.2
 /** С чем сравниваем удар, чтобы понять, выделяется ли он. */
 const ARROW_CONTRAST_SEC = 0.5
@@ -279,7 +307,7 @@ export function generateLaneLevel(
   const chains = focus === 'voice' ? [] : parts.map((part) => part.chain)
   const heard = difficulty.isAdvanced ? allHeardFrames(analysis, picked) : picked
   const arranged = arrangeRhythm(picked, heard, softChains, chains, analysis.fps, difficulty, intensity)
-  const { ladder, rhythmic, beats } = arranged
+  const { ladder, rhythmic, beats, softBeats } = arranged
   const syllables = pickSyllables(analysis, reading, difficulty)
   const frames = [...arranged.frames.filter((frame) => !isRead(frame / analysis.fps)), ...syllables]
   frames.sort((a, b) => a - b)
@@ -304,6 +332,9 @@ export function generateLaneLevel(
     notes.push({ id: i, time, lane, kind, direction: 0 })
   }
 
+  // Одинаковая музыка играется одинаково: повтор такта получает рисунок первого
+  const repeated = focus === 'voice' ? notes : repeatBars(notes, analysis, [...softChains, ...chains], ladder, rhythmic)
+  notes.splice(0, notes.length, ...repeated)
   markLastNotesBeforePauses(notes, moments)
   const sections = findSections(analysis, intensity)
   const phraseEnds = focus === 'voice' ? [] : findPhraseEnds(analysis, [...softChains, ...chains], moments)
@@ -314,11 +345,141 @@ export function generateLaneLevel(
   const withPairs = addPairs(withArrows, difficulty, analysis, intensity, isLadder)
   const withSustains = addSustainHolds(withPairs, difficulty, sustains.filter((sustain) => !isRead(sustain.start)))
   const rhythmicFrames = new Set(rhythmic)
-  const withHolds = addHolds(withSustains, difficulty, moments, isLadder, analysis, beats, rhythmicFrames, reading)
+  const withHolds = addHolds(withSustains, difficulty, moments, isLadder, analysis, beats, rhythmicFrames, reading, softBeats)
   const withAccents = addAccents(withHolds, moments, sections, sustains, analysis, intensity)
   if (trace) trace.beforeLimit = withAccents
   // Последним: предыдущие шаги убирают ноты, и соседями могут оказаться ноты с одной дорожки
   return avoidTriples(dropNotesUnderBeams(trimBeamsAtSpaces(limitDensity(withAccents, difficulty))), isLadder)
+}
+
+/**
+ * Повторы. Ручную карту выдаёт прежде всего то, что одинаковая музыка играется
+ * одинаково: припев во второй раз тем же рисунком, что и в первый. Детектор же
+ * в каждом такте слышит чуть иначе, и рисунок плывёт. Поэтому такт, очень похожий
+ * на один из прежних и по ударам, и по тембру, получает его ноты и дорожки.
+ * Похожесть меряется дважды: где в такте удары и какой у него спектр. Берётся
+ * меньшая из двух, чтобы тот же бит под другой мелодией повтором не считался.
+ */
+function repeatBars(
+  notes: LaneNote[],
+  analysis: AudioAnalysis,
+  chains: number[][],
+  ladder: number[],
+  rhythmic: number[],
+): LaneNote[] {
+  const bars = findBars(chains, 0)
+  // Отрезок мог начать счёт сетки не с первой доли такта: образцы берём и со сдвигом
+  // на полтакта, иначе повтор в соседнем отрезке не узнать
+  const sources = [...bars, ...findBars(chains, 1)].sort((a, b) => a[0] - b[0])
+  const prints = bars.map((bar) => barPrint(analysis, bar))
+  const sourcePrints = sources.map((bar) => barPrint(analysis, bar))
+  const ladderSet = new Set(ladder)
+  const rhythmicSet = new Set(rhythmic)
+  const isPlain = (note: LaneNote) => note.kind === 'tap' || note.kind === 'star'
+  // Повтор всегда копирует исходный такт, а не копию: каждый второй повтор зеркальный,
+  // ритм тот же, а рука ходит в обе стороны, как в ручных картах
+  const rootOf = new Map<number, [number, number]>()
+  const uses = new Map<number, number>()
+  const original = notes
+  let result = notes
+  for (let i = 0; i < bars.length; i++) {
+    const [from, to] = bars[i]
+    let source = -1
+    let best = REPEAT_MIN_SIMILARITY
+    for (let j = 0; j < sources.length && sources[j][1] <= from + REPEAT_EDGE_SLACK_SEC; j++) {
+      // Такт, в начале которого ещё нет нот, образцом быть не может: он неполный
+      if (sources[j][0] < FIRST_NOTE_SEC) continue
+      const length = sources[j][1] - sources[j][0]
+      if (Math.abs(length - (to - from)) > (to - from) * REPEAT_LENGTH_TOLERANCE) continue
+      // Тот же рисунок тише или громче это другая часть песни: куплет, а не припев
+      const loudness = prints[i].loudness / Math.max(1e-9, sourcePrints[j].loudness)
+      if (loudness < 1 / REPEAT_LOUDNESS_RATIO || loudness > REPEAT_LOUDNESS_RATIO) continue
+      const similarity = Math.min(cosine(prints[i].hits, sourcePrints[j].hits), cosine(prints[i].timbre, sourcePrints[j].timbre))
+      if (similarity >= best) {
+        best = similarity
+        source = j
+      }
+    }
+    if (source === -1) continue
+    const [sourceFrom, sourceTo] = rootOf.get(sources[source][0]) ?? sources[source]
+    const template = original.filter((note) => isPlain(note) && note.time >= sourceFrom && note.time < sourceTo)
+    // Повтор выравнивает рисунок, но не меняет плотность: заметно более редкий или
+    // густой образец значит, что такты всё же разные
+    const own = result.filter((note) => isPlain(note) && note.time >= from && note.time < to).length
+    const isClose = template.length >= own * REPEAT_MIN_KEEP && template.length <= own / REPEAT_MIN_KEEP
+    if (template.length === 0 || !isClose) continue
+    const scale = (to - from) / (sourceTo - sourceFrom)
+    const use = (uses.get(sourceFrom) ?? 0) + 1
+    uses.set(sourceFrom, use)
+    rootOf.set(from, [sourceFrom, sourceTo])
+    const isMirrored = use % 2 === 1
+    const copies = template.map((note) => {
+      const frame = Math.round((from + (note.time - sourceFrom) * scale) * analysis.fps)
+      // Копия лесенки остаётся лесенкой, копия доли остаётся долей
+      const sourceFrame = Math.round(note.time * analysis.fps)
+      if (ladderSet.has(sourceFrame)) ladder.push(frame)
+      if (rhythmicSet.has(sourceFrame)) rhythmic.push(frame)
+      return { ...note, time: frame / analysis.fps, lane: isMirrored ? 2 - note.lane : note.lane }
+    })
+    const kept = result.filter((note) => !isPlain(note) || note.time < from || note.time >= to)
+    result = [...kept, ...copies].sort((a, b) => a.time - b.time)
+  }
+  return result.map((note, id) => ({ ...note, id }))
+}
+
+/**
+ * Такты: на коротком шаге ритма два шага, на длинном один, чтобы такт был около
+ * двух секунд. offset сдвигает начало счёта на столько шагов.
+ */
+function findBars(chains: number[][], offset: number): [number, number][] {
+  const bars: [number, number][] = []
+  for (const chain of chains) {
+    if (chain.length < 3) continue
+    const per = chain[1] - chain[0] < LONG_STEP_SEC ? 2 : 1
+    if (offset > 0 && per === 1) continue
+    for (let i = offset; i + per < chain.length; i += per) bars.push([chain[i], chain[i + per]])
+  }
+  return bars.sort((a, b) => a[0] - b[0])
+}
+
+/** Отпечаток такта: сила ударов в шестнадцати долях и средний спектр. */
+function barPrint(
+  analysis: AudioAnalysis,
+  [from, to]: [number, number],
+): { hits: Float32Array; timbre: Float32Array; loudness: number } {
+  const fps = analysis.fps
+  const hits = new Float32Array(REPEAT_SLOTS)
+  for (let slot = 0; slot < REPEAT_SLOTS; slot++) {
+    const first = Math.round((from + ((to - from) * slot) / REPEAT_SLOTS) * fps)
+    const last = Math.min(analysis.frameCount, Math.round((from + ((to - from) * (slot + 1)) / REPEAT_SLOTS) * fps))
+    let peak = 0
+    let low = 0
+    for (let frame = first; frame < last; frame++) {
+      peak = Math.max(peak, analysis.onsetStrength[frame])
+      if (analysis.lowOnsets[frame] === 1) low = 1
+    }
+    hits[slot] = peak + 0.5 * low
+  }
+  const bins = analysis.spectrumBins
+  const timbre = new Float32Array(bins)
+  for (let frame = Math.round(from * fps); frame < Math.min(analysis.frameCount, Math.round(to * fps)); frame++) {
+    for (let bin = 0; bin < bins; bin++) timbre[bin] += analysis.spectrum[frame * bins + bin]
+  }
+  let loudness = 0
+  for (const value of timbre) loudness += value
+  return { hits, timbre, loudness: loudness / Math.max(1, (to - from) * fps) }
+}
+
+function cosine(a: Float32Array, b: Float32Array): number {
+  let dot = 0
+  let lengthA = 0
+  let lengthB = 0
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i]
+    lengthA += a[i] * a[i]
+    lengthB += b[i] * b[i]
+  }
+  return dot / Math.sqrt(lengthA * lengthB + 1e-9)
 }
 
 /**
@@ -361,15 +522,18 @@ function placeArrowAccents(
     }
   }
   // Стрелки встают вокруг самого заметного удара в этом месте, а не по часам
-  const windows: { from: number; to: number }[] = []
+  const windows: { from: number; to: number; range: { from: number; to: number } }[] = []
   for (const range of ranges) {
     const inside = notes.filter((note) => note.kind === 'tap' && note.time >= range.from && note.time < range.to)
     if (inside.length === 0) continue
     const best = inside.reduce((a, b) => (strengthOf(b) > strengthOf(a) ? b : a))
-    windows.push({ from: best.time - ARROW_WINDOW_SEC / 2, to: best.time + ARROW_WINDOW_SEC / 2 })
+    windows.push({ from: best.time - ARROW_WINDOW_SEC / 2, to: best.time + ARROW_WINDOW_SEC / 2, range })
   }
 
   const arrows = new Set<LaneNote>()
+  // Сколько раз уже стрелка шла с каждой дорожки: повторы ставят сильные доли на одни
+  // и те же дорожки, и без этого стрелки шли бы всё время в одну сторону
+  const usedLanes = [0, 0, 0]
   for (const window of windows) {
     // На протяжке и в паузе стрелка неуместна, в остальном решает сила удара
     const isFitting = (note: LaneNote) => !isNearSustain(note.time, sustains) && isAllowed(note.time, moments)
@@ -377,15 +541,38 @@ function placeArrowAccents(
       (note) => note.kind === 'tap' && note.time >= window.from && note.time < window.to && isFitting(note),
     )
     if (candidates.length === 0) continue
-    candidates.sort((a, b) => strengthOf(b) - strengthOf(a))
-    const strongest = strengthOf(candidates[0])
+    const strongest = Math.max(...candidates.map(strengthOf))
+    // Из почти равных по силе ударов стрелка достаётся той дорожке, что была реже
+    const total = Math.max(1, usedLanes[0] + usedLanes[1] + usedLanes[2])
+    const score = (note: LaneNote) => strengthOf(note) / (1 + ARROW_SAME_LANE_PENALTY * (usedLanes[note.lane] / total))
+    const strong = candidates.filter((note) => strengthOf(note) >= strongest * ARROW_STRONG_SHARE)
+    // Если редкой дорожки рядом нет, её сильный удар ищем во всём месте перед концом фразы
+    const rarest = usedLanes.indexOf(Math.min(...usedLanes))
+    if (!strong.some((note) => note.lane === rarest)) {
+      const { range } = window
+      strong.push(
+        ...notes.filter(
+          (note) =>
+            note.kind === 'tap' &&
+            note.lane === rarest &&
+            note.time >= range.from &&
+            note.time < range.to &&
+            isFitting(note) &&
+            strengthOf(note) >= strongest * ARROW_STRONG_SHARE,
+        ),
+      )
+    }
+    strong.sort((a, b) => score(b) - score(a))
 
     const chosen: LaneNote[] = []
-    for (const note of candidates) {
-      if (chosen.length >= difficulty.arrowRun || strengthOf(note) < strongest * ARROW_STRONG_SHARE) break
+    for (const note of strong) {
+      if (chosen.length >= difficulty.arrowRun) break
       if (chosen.every((other) => Math.abs(other.time - note.time) >= ARROW_MIN_SPACING_SEC)) chosen.push(note)
     }
-    for (const note of chosen) arrows.add(note)
+    for (const note of chosen) {
+      arrows.add(note)
+      usedLanes[note.lane] += 1
+    }
   }
 
   const result: LaneNote[] = []
@@ -417,6 +604,7 @@ function addHolds(
   beats: Map<number, number>,
   rhythmic: Set<number>,
   reading: { start: number; end: number }[],
+  softBeats: Set<number>,
 ): LaneNote[] {
   const result: LaneNote[] = []
   const skipped = new Set<LaneNote>()
@@ -429,6 +617,7 @@ function addHolds(
   }
   let holdCount = 0
   let lastHoldEnd = 0
+  const pitchChanges = pitchChangeFrames(analysis)
 
   for (let i = 0; i < notes.length; i++) {
     const note = notes[i]
@@ -438,8 +627,13 @@ function addHolds(
     let duration = 0
     if (isFree && rhythmic.has(frame)) {
       // В ритме луч ставит сам звук: на сильной доле он нарастает и тянется
+      // Но на мягком пульсе разгона, если внутри звучат быстрые отдельные звуки, это рифф,
+      // и его надо отбивать нотами. В обычном ритме луч на доле остаётся, как в живой игре
       const step = beats.get(frame)
-      if (step && soundSwells(analysis, frame)) duration = step * BEAT_HOLD_SHARE
+      const length = (step ?? 0) * BEAT_HOLD_SHARE
+      const hits = step && softBeats.has(frame) ? hitsInside(analysis, pitchChanges, note.time, note.time + length) : 0
+      const isRiff = hits >= BEAT_HOLD_MAX_HITS && hits / Math.max(0.1, length - HOLD_INNER_MARGIN_SEC) >= RIFF_MIN_RATE
+      if (step && !isRiff && soundSwells(analysis, frame)) duration = length
     } else if (isFree && !isLadder(note)) {
       // Вне ритма луч ставит долгая нота мелодии: звук держится, а ударов поверх нет
       const held = heldNoteSec(analysis, frame)
@@ -826,7 +1020,9 @@ function arrangeRhythm(
   fps: number,
   difficulty: Difficulty,
   intensity: Float32Array,
-): { frames: number[]; ladder: number[]; rhythmic: number[]; beats: Map<number, number> } {
+): { frames: number[]; ladder: number[]; rhythmic: number[]; beats: Map<number, number>; softBeats: Set<number> } {
+  // Доли мягкого пульса: там под протяжным звуком может играть рифф
+  const softBeats = new Set<number>()
   let frames = [...picked]
   const ladder: number[] = []
   const rhythmic: number[] = []
@@ -861,6 +1057,7 @@ function arrangeRhythm(
       const slotSec = (chain[i + 1] - chain[i]) / slotCount
       const toFrame = (slot: number) => Math.round((chain[i] + slot * slotSec) * fps)
       beats.set(toFrame(0), chain[i + 1] - chain[i])
+      if (isSoft) softBeats.add(toFrame(0))
       if (ladderSteps.has(i)) {
         // Средней сложности на длинном шаге лесенка идёт через долю: шестнадцатые для неё быстры
         const stride = slotCount > STEP_SLOTS && difficulty.isEighthsOnly ? 2 : 1
@@ -883,7 +1080,7 @@ function arrangeRhythm(
   rhythmic.push(...ladder)
   const unique = [...new Set(frames)]
   unique.sort((a, b) => a - b)
-  return { frames: unique, ladder, rhythmic, beats }
+  return { frames: unique, ladder, rhythmic, beats, softBeats }
 }
 
 /**
@@ -906,6 +1103,42 @@ function allHeardFrames(analysis: AudioAnalysis, picked: number[]): number[] {
     if (analysis.onsets[frame] === 1 || analysis.lowOnsets[frame] === 1) heard.push(frame)
   }
   return heard
+}
+
+/** Сколько отдельных звуков внутри отрезка: удары, удары в низах и смены нот. */
+function hitsInside(analysis: AudioAnalysis, pitchChanges: number[], from: number, to: number): number {
+  const first = Math.round((from + HOLD_INNER_MARGIN_SEC) * analysis.fps)
+  const last = Math.min(analysis.frameCount, Math.round(to * analysis.fps))
+  let hits = 0
+  for (let frame = first; frame < last; frame++) {
+    if (analysis.onsets[frame] === 1 || analysis.lowOnsets[frame] === 1) hits += 1
+  }
+  return hits + pitchChanges.filter((frame) => frame >= first && frame < last).length
+}
+
+/**
+ * Где мелодия переходит на другую ноту. Новая нота должна продержаться хотя бы
+ * PITCH_CHANGE_HOLD_SEC: короткие скачки высоты это сбой слежения, а не нота риффа.
+ */
+function pitchChangeFrames(analysis: AudioAnalysis): number[] {
+  const { pitch } = analysis.melody
+  const hold = Math.round(PITCH_CHANGE_HOLD_SEC * analysis.fps)
+  const frames: number[] = []
+  let current = 0
+  let start = 0
+  let lastNote = 0
+  for (let frame = 0; frame <= pitch.length; frame++) {
+    const note = frame < pitch.length ? Math.round(pitch[frame]) : -1
+    if (note === current) continue
+    // Закончился отрезок одной высоты: если он был нотой и держался, это смена
+    if (current > 0 && frame - start >= hold && current !== lastNote) {
+      frames.push(start)
+      lastNote = current
+    }
+    current = note
+    start = frame
+  }
+  return frames
 }
 
 /** В каждой фразе лесенкой становится шаг, где музыка сама звучит чаще всего. */

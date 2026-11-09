@@ -357,6 +357,28 @@ describe('драматургия песни', () => {
     const found = findMoments(analyzeAudio(sparse, SAMPLE_RATE))
     expect(found.filter((moment) => moment.kind === 'pause')).toEqual([])
   })
+
+  it('одинаковые такты играются одинаковым рисунком', () => {
+    // Такт из бочек с синкопой повторяется весь трек: рисунок и дорожки должны повторяться
+    const samples = new Float32Array(SAMPLE_RATE * 40)
+    for (let bar = 0; bar < 18; bar++) {
+      for (const offset of [0, 0.5, 0.75, 1, 1.5]) addKicks(samples, 2 + bar * 2 + offset, 2 + bar * 2 + offset + 0.01, 1, () => 0.9)
+    }
+    const notes = generateLaneLevel(analyzeAudio(samples, SAMPLE_RATE), hard)
+    // Через такт стоит нота на том же месте, на той же дорожке или на отражённой:
+    // каждый второй повтор зеркальный. Стрелки и парные ноты ставятся поверх как
+    // акценты, их дорожки не сравниваем
+    const middle = notes.filter((note) => note.time >= 10 && note.time < 34)
+    const partner = (note: LaneNote) => notes.find((other) => Math.abs(other.time - note.time - 2) < 0.03)
+    const sameTime = middle.filter((note) => partner(note) !== undefined)
+    const plainPairs = middle.filter((note) => note.kind === 'tap' && partner(note)?.kind === 'tap')
+    const sameShape = plainPairs.filter((note) => {
+      const lane = partner(note)?.lane
+      return lane === note.lane || lane === 2 - note.lane
+    })
+    expect(sameTime.length / middle.length).toBeGreaterThanOrEqual(0.8)
+    expect(sameShape.length / plainPairs.length).toBeGreaterThanOrEqual(0.9)
+  })
 })
 
 describe('смена бита посреди трека', () => {

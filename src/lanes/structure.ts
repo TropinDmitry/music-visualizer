@@ -89,6 +89,15 @@ const EDGE_SCAN_STEP_SEC = 0.1
 const SECTION_SNAP_SEC = 4
 /** Ритм выражен ярко, если настоящих ударов в цепочке не меньше этой доли. */
 const RHYTHM_HIT_SHARE = 0.6
+/**
+ * Отрезок, где сетка сама не нашлась, пробует темп песни. Темп уже известен, ищем
+ * только фазу, поэтому хватает и меньшей доли попаданий, а допуск шире: мягкий
+ * синтезатор детектор слышит с разбросом.
+ */
+const SONG_TEMPO_HIT_SHARE = 0.45
+const SONG_TEMPO_TOLERANCE_SEC = 0.07
+/** Темп песни получают только отрезки хотя бы средней силы: тихому месту сетка не нужна. */
+const SONG_TEMPO_MIN_LEVEL = 0.3
 const RHYTHM_MIN_HITS = 5
 /** Темп считается темпом песни, если встретился хотя бы в стольких отрезках. */
 const TEMPO_MIN_PARTS = 3
@@ -112,6 +121,8 @@ const SUSTAIN_MIN_PRESENCE = 0.22
 /** На сколько столбиков спектра должен подняться тембр, чтобы это был взлёт. */
 const SUSTAIN_RISE_SEC = 1.5
 const SUSTAIN_MIN_RISE = 4
+/** Отрезок отдаётся лучам, только если протяжка занимает больше этой его доли. */
+const PART_BUSY_SHARE = 0.5
 /** Окно сравнения силы до и после границы части. */
 const SECTION_COMPARE_SEC = 7
 const SECTION_MIN_JUMP = 0.22
@@ -453,7 +464,7 @@ export interface SongPart {
 export function findSongParts(analysis: AudioAnalysis, sustains: Moment[], softPulses: number[]): SongPart[] {
   const parts: SongPart[] = []
   for (const { start, end } of partRanges(analysis)) {
-    const isBusy = sustains.some((sustain) => sustain.start < end && sustain.end > start)
+    const isBusy = sustainShare(sustains, start, end) > PART_BUSY_SHARE
     const hasPulse = softPulses.some((time) => time >= start && time < end)
     // Удары в низах держат темп в тяжёлой музыке, где общий детектор слышит мало
     const all = [...analysis.onsetTimes, ...analysis.lowOnsetTimes].sort((a, b) => a - b)
@@ -467,7 +478,69 @@ export function findSongParts(analysis: AudioAnalysis, sustains: Moment[], softP
     const isClear = chain.length > 0 && hits / chain.length >= RHYTHM_HIT_SHARE
     parts.push({ start, end, chain: isClear ? longEnoughStep(chain) : [] })
   }
-  return keepSteadyTempo(parts)
+  return withSongTempo(analysis, keepSteadyTempo(parts), sustains, softPulses)
+}
+
+/**
+ * Темп песни один на всю песню. Если отрезок не нашёл сетку сам, а другие нашли,
+ * идём тем же шагом и подбираем фазу по ударам и сменам нот этого отрезка. Иначе
+ * разгон с мягким риффом, как в Levels около 50-й секунды, игрался бы россыпью.
+ */
+function withSongTempo(analysis: AudioAnalysis, parts: SongPart[], sustains: Moment[], softPulses: number[]): SongPart[] {
+  const steps = parts.filter((part) => part.chain.length > 1).map((part) => chainStep(part.chain))
+  if (steps.length === 0) return parts
+  // Самый частый шаг: у него больше всего близнецов
+  let songStep = steps[0]
+  let bestTwins = 0
+  for (const step of steps) {
+    const twins = steps.filter((other) => isSameStep(other, step)).length
+    if (twins > bestTwins) {
+      bestTwins = twins
+      songStep = step
+    }
+  }
+  const all = [...analysis.onsetTimes, ...analysis.lowOnsetTimes, ...analysis.melody.noteTimes].sort((a, b) => a - b)
+  const intensity = songIntensity(analysis)
+  const levelOf = (part: SongPart) => {
+    let sum = 0
+    const from = Math.round(part.start * analysis.fps)
+    const to = Math.min(intensity.length, Math.round(part.end * analysis.fps))
+    for (let i = from; i < to; i++) sum += intensity[i]
+    return sum / Math.max(1, to - from)
+  }
+  return parts.map((part) => {
+    if (part.chain.length > 1 || levelOf(part) < SONG_TEMPO_MIN_LEVEL) return part
+    const isBusy = sustainShare(sustains, part.start, part.end) > PART_BUSY_SHARE
+    const hasPulse = softPulses.some((time) => time >= part.start && time < part.end)
+    if (isBusy || hasPulse) return part
+    const peaks = all.filter((time) => time >= part.start && time < part.end)
+    let best: number[] = []
+    let bestHits = 0
+    for (const start of peaks) {
+      if (start - part.start > songStep) break
+      // Темп известен: идём ровным шагом через весь отрезок и не обрываемся на пропусках
+      const chain: number[] = []
+      let hits = 0
+      for (let expected = start; expected < part.end; expected += songStep) {
+        const found = peaks.find((peak) => Math.abs(peak - expected) <= SONG_TEMPO_TOLERANCE_SEC)
+        chain.push(found ?? expected)
+        if (found !== undefined) hits += 1
+      }
+      if (hits > bestHits) {
+        best = chain
+        bestHits = hits
+      }
+    }
+    const isClear = bestHits >= RHYTHM_MIN_HITS && bestHits / best.length >= SONG_TEMPO_HIT_SHARE
+    return isClear ? { ...part, chain: longEnoughStep(best) } : part
+  })
+}
+
+/** Какую долю отрезка занимают протяжки. */
+function sustainShare(sustains: Moment[], start: number, end: number): number {
+  let covered = 0
+  for (const sustain of sustains) covered += Math.max(0, Math.min(end, sustain.end) - Math.max(start, sustain.start))
+  return covered / Math.max(0.001, end - start)
 }
 
 /** Шаг цепочки в секундах. */
