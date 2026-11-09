@@ -378,7 +378,8 @@ describe('драматургия песни', () => {
       return lane === note.lane || lane === 2 - note.lane
     })
     expect(sameTime.length / middle.length).toBeGreaterThanOrEqual(0.8)
-    expect(sameShape.length / plainPairs.length).toBeGreaterThanOrEqual(0.9)
+    // Пары ставятся по чёткости удара и иногда меняют дорожку второй ноты в одном из повторов
+    expect(sameShape.length / plainPairs.length).toBeGreaterThanOrEqual(0.85)
   })
 })
 

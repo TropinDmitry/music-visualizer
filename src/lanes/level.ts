@@ -64,8 +64,10 @@ export interface Difficulty {
   strengthShare: number
   /** Серии стрелок идут не чаще, чем раз в столько секунд. */
   arrowPeriodSec: number
-  /** В сильных частях песни каждая какая нота становится парной. 0 — парных нет. */
-  pairEvery: number
+  /** Пара нот на чётком ударе мощной части не чаще раза в столько секунд. 0 — парных нет. */
+  pairGapSec: number
+  /** На самых сильных переходах вместо пары ставится нота сразу на все три дорожки. */
+  triples: boolean
   /** Самое короткое расстояние между нотами, которое вообще можно сыграть. */
   floorGapSec: number
   /** Сколько нот максимум за любую секунду. */
@@ -88,9 +90,9 @@ export interface Difficulty {
 }
 
 export const DIFFICULTIES: Difficulty[] = [
-  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, pulsePattern: [0], isAdvanced: false, readingGapSec: 0.42, ladderPhraseSteps: 4, isEighthsOnly: true, arrowPeriodSec: 20, pairEvery: 0, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
-  { id: 'normal', label: 'Средняя', minGapSec: 0.2, strengthShare: 0.76, pulsePattern: [0, 0.5], isAdvanced: true, readingGapSec: 0.16, ladderPhraseSteps: 8, isEighthsOnly: true, arrowPeriodSec: 12, pairEvery: 16, floorGapSec: 0.15, maxPerSecond: 7, arrowRun: 3, doubleHolds: false, canFail: true },
-  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.72, pulsePattern: [0, 0.5], isAdvanced: true, readingGapSec: 0.08, ladderPhraseSteps: 4, isEighthsOnly: false, arrowPeriodSec: 7, pairEvery: 11, floorGapSec: 0.08, maxPerSecond: 12, arrowRun: 4, doubleHolds: true, canFail: true },
+  { id: 'easy', label: 'Лёгкая', minGapSec: 0.45, strengthShare: 0.88, pulsePattern: [0], isAdvanced: false, readingGapSec: 0.42, ladderPhraseSteps: 4, isEighthsOnly: true, arrowPeriodSec: 20, pairGapSec: 0, triples: false, floorGapSec: 0.4, maxPerSecond: 2, arrowRun: 3, doubleHolds: false, canFail: false },
+  { id: 'normal', label: 'Средняя', minGapSec: 0.2, strengthShare: 0.76, pulsePattern: [0, 0.5], isAdvanced: true, readingGapSec: 0.16, ladderPhraseSteps: 8, isEighthsOnly: true, arrowPeriodSec: 12, pairGapSec: 2, triples: false, floorGapSec: 0.15, maxPerSecond: 7, arrowRun: 3, doubleHolds: false, canFail: true },
+  { id: 'hard', label: 'Сложная', minGapSec: 0.14, strengthShare: 0.72, pulsePattern: [0, 0.5], isAdvanced: true, readingGapSec: 0.08, ladderPhraseSteps: 4, isEighthsOnly: false, arrowPeriodSec: 7, pairGapSec: 0.9, triples: true, floorGapSec: 0.08, maxPerSecond: 12, arrowRun: 4, doubleHolds: true, canFail: true },
 ]
 
 /** Каждая какая нота становится звездой, если она не стрелка. */
@@ -190,6 +192,16 @@ const ROLL_MOTIF_NOTES = 7
 const ACCENT_CLEAR_SEC = 0.2
 /** Выше этой силы песни часть нот становится парными. */
 const INTENSE_LEVEL = 0.55
+/** Парными становятся удары из верхних 65% по чёткости в мощных частях. */
+const PAIR_TOP_SHARE = 0.35
+/** Рядом с парой нет других нот ближе этого: двумя пальцами жмут отдельный удар. */
+const PAIR_CLEAR_SEC = 0.15
+/** Вторая дорожка пары: для каждой первой по очереди соседняя и дальняя. */
+const PAIR_PARTNERS = [
+  [1, 2],
+  [2, 0],
+  [1, 0],
+]
 /** С чем сравниваем удар: с самым сильным в такой окрестности. */
 const STRENGTH_REACH_SEC = 2
 /** В обычном режиме слог становится нотой, только если он сильный: голос поверх ритма. */
@@ -346,7 +358,7 @@ export function generateLaneLevel(
   const withSustains = addSustainHolds(withPairs, difficulty, sustains.filter((sustain) => !isRead(sustain.start)))
   const rhythmicFrames = new Set(rhythmic)
   const withHolds = addHolds(withSustains, difficulty, moments, isLadder, analysis, beats, rhythmicFrames, reading, softBeats)
-  const withAccents = addAccents(withHolds, moments, sections, sustains, analysis, intensity)
+  const withAccents = addAccents(withHolds, moments, sections, sustains, analysis, intensity, difficulty)
   if (trace) trace.beforeLimit = withAccents
   // Последним: предыдущие шаги убирают ноты, и соседями могут оказаться ноты с одной дорожки
   return avoidTriples(dropNotesUnderBeams(trimBeamsAtSpaces(limitDensity(withAccents, difficulty))), isLadder)
@@ -496,21 +508,7 @@ function placeArrowAccents(
   sustains: Moment[],
   moments: Moment[],
 ): LaneNote[] {
-  const strengthOf = (note: LaneNote) => {
-    const frame = Math.round(note.time * analysis.fps)
-    let peak = 0
-    for (let i = Math.max(0, frame - 2); i <= Math.min(analysis.frameCount - 1, frame + 2); i++) {
-      peak = Math.max(peak, analysis.onsetStrength[i])
-    }
-    const reach = Math.round(ARROW_CONTRAST_SEC * analysis.fps)
-    let sum = 0
-    let count = 0
-    for (let i = Math.max(0, frame - reach); i <= Math.min(analysis.frameCount - 1, frame + reach); i++) {
-      sum += analysis.onsetStrength[i]
-      count += 1
-    }
-    return peak / Math.max(ARROW_CONTRAST_FLOOR, sum / Math.max(1, count))
-  }
+  const strengthOf = (note: LaneNote) => hitContrast(analysis, note.time)
 
   // Где искать: у конца каждой фразы, а если фраз нет, в каждом отрезке песни
   const ranges: { from: number; to: number }[] = []
@@ -582,6 +580,23 @@ function placeArrowAccents(
     result.push(arrows.has(note) ? { ...note, kind: 'swipe', direction: arrowDirection(note.lane) } : note)
   }
   return result
+}
+
+/** Насколько удар выделяется на фоне соседних: пик силы удара против среднего вокруг. */
+function hitContrast(analysis: AudioAnalysis, time: number): number {
+  const frame = Math.round(time * analysis.fps)
+  let peak = 0
+  for (let i = Math.max(0, frame - 2); i <= Math.min(analysis.frameCount - 1, frame + 2); i++) {
+    peak = Math.max(peak, analysis.onsetStrength[i])
+  }
+  const reach = Math.round(ARROW_CONTRAST_SEC * analysis.fps)
+  let sum = 0
+  let count = 0
+  for (let i = Math.max(0, frame - reach); i <= Math.min(analysis.frameCount - 1, frame + reach); i++) {
+    sum += analysis.onsetStrength[i]
+    count += 1
+  }
+  return peak / Math.max(ARROW_CONTRAST_FLOOR, sum / Math.max(1, count))
 }
 
 /** Стрелка показывает туда, где стоит: слева влево, справа вправо, по центру вверх. */
@@ -1252,7 +1267,13 @@ function dropUnevenFast(frames: number[], fps: number): number[] {
   return kept
 }
 
-/** В сильных частях часть обычных нот становится парной: припев и на ощупь мощнее. */
+/**
+ * Пары нот на чётких ударах. В мощной части самые выделяющиеся удары, верхняя
+ * часть по силе на фоне соседних, становятся нажатием двумя пальцами. Пара
+ * не чаще раза в pairGapSec, и рядом с ней нет нот вплотную: двумя пальцами
+ * жмут отдельный удар, а не середину быстрой серии. Дорожки пар чередуются:
+ * соседние и крайние, первая и третья.
+ */
 function addPairs(
   notes: LaneNote[],
   difficulty: Difficulty,
@@ -1260,21 +1281,49 @@ function addPairs(
   intensity: Float32Array,
   isLadder: (note: LaneNote) => boolean,
 ): LaneNote[] {
-  if (difficulty.pairEvery === 0) return notes
+  if (difficulty.pairGapSec === 0) return notes
+  const isCandidate = (note: LaneNote, index: number) => {
+    if (note.kind !== 'tap' || isLadder(note)) return false
+    if (intensityAt(intensity, note.time, analysis.fps) < INTENSE_LEVEL) return false
+    const previous = notes[index - 1]
+    const next = notes[index + 1]
+    const isClear = (other: LaneNote | undefined) => !other || Math.abs(other.time - note.time) >= PAIR_CLEAR_SEC
+    return isClear(previous) && isClear(next)
+  }
+  const candidates = notes.map((note, index) => ({ note, contrast: hitContrast(analysis, note.time), index }))
+    .filter(({ note, index }) => isCandidate(note, index))
+  if (candidates.length === 0) return notes
+  const threshold = percentileOf(candidates.map(({ contrast }) => contrast), PAIR_TOP_SHARE)
+
+  // Сначала самые чёткие удары: соседние пары ближе pairGapSec уступают им
+  const sorted = candidates.filter(({ contrast }) => contrast >= threshold).sort((a, b) => b.contrast - a.contrast)
+  const chosen = new Set<LaneNote>()
+  const times: number[] = []
+  for (const { note } of sorted) {
+    if (times.some((time) => Math.abs(time - note.time) < difficulty.pairGapSec)) continue
+    chosen.add(note)
+    times.push(note.time)
+  }
+
   const result: LaneNote[] = []
-  let notesSincePair = 0
+  let pairCount = 0
   for (const note of notes) {
-    const frame = Math.min(Math.round(note.time * analysis.fps), intensity.length - 1)
-    if (intensity[frame] >= INTENSE_LEVEL) notesSincePair += 1
-    if (note.kind === 'tap' && notesSincePair >= difficulty.pairEvery && !isLadder(note)) {
-      notesSincePair = 0
-      result.push({ ...note, kind: 'accent' })
-      result.push({ ...note, kind: 'accent', lane: (note.lane + 1 + (result.length % 2)) % 3 })
-    } else {
+    if (!chosen.has(note)) {
       result.push(note)
+      continue
     }
+    const partner = PAIR_PARTNERS[note.lane][pairCount % 2]
+    pairCount += 1
+    result.push({ ...note, kind: 'accent' })
+    result.push({ ...note, kind: 'accent', lane: partner })
   }
   return result
+}
+
+/** Значение, ниже которого лежит доля share всех значений. */
+function percentileOf(values: number[], share: number): number {
+  const sorted = [...values].sort((a, b) => a - b)
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * share))]
 }
 
 /** Отбирает удары с учётом драматургии: чаще на разгоне, ничего в паузе и у акцента. */
@@ -1347,6 +1396,7 @@ function addAccents(
   sustains: Moment[],
   analysis: AudioAnalysis,
   intensity: Float32Array,
+  difficulty: Difficulty,
 ): LaneNote[] {
   const impacts = moments.filter((moment) => moment.kind === 'impact')
   const meanOf = (values: Float32Array, from: number, to: number) => {
@@ -1392,8 +1442,9 @@ function addAccents(
     if (isNearSpace || impact.start - lastAccent < MIN_ACCENT_GAP_SEC) continue
     if (isNearSustain(impact.start, sustains)) continue
     lastAccent = impact.start
-    result.push({ id: 0, time: impact.start, lane: 0, kind: 'accent', direction: 0 })
-    result.push({ id: 0, time: impact.start, lane: 2, kind: 'accent', direction: 0 })
+    // На сложной самый сильный переход берётся сразу тремя пальцами
+    const lanes = difficulty.triples ? [0, 1, 2] : [0, 2]
+    for (const lane of lanes) result.push({ id: 0, time: impact.start, lane, kind: 'accent', direction: 0 })
   }
 
   result.sort((a, b) => a.time - b.time)
