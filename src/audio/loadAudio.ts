@@ -1,4 +1,4 @@
-import { synthesizeDemoTrack } from './demoTrack.ts'
+import { synthesizeShowcaseTrack } from './showcaseTrack.ts'
 
 /** Длиннее этого файлы не берём: анализ занял бы минуты, а уровень был бы на полчаса. */
 export const MAX_MEDIA_SEC = 600
@@ -31,7 +31,7 @@ export async function decodeAudioFile(file: Blob, context: AudioContext): Promis
 
 /** Демо-трек, синтезированный прямо в браузере — чтобы попробовать без своего файла. */
 export function createDemoBuffer(context: AudioContext): AudioBuffer {
-  const demo = synthesizeDemoTrack(20, context.sampleRate)
+  const demo = synthesizeShowcaseTrack(context.sampleRate)
   const buffer = context.createBuffer(2, demo.left.length, demo.sampleRate)
   buffer.copyToChannel(demo.left, 0)
   buffer.copyToChannel(demo.right, 1)

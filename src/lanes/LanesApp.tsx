@@ -1104,7 +1104,9 @@ export function LanesApp() {
               className="text-button"
               onClick={() => {
                 clearClip()
-                void loadBuffer(createDemoBuffer(getPlayer().context), text.demoName)
+                // Синтез демо занимает около секунды: сначала показываем, что идёт работа
+                setStatus(text.building)
+                window.setTimeout(() => void loadBuffer(createDemoBuffer(getPlayer().context), text.demoName), 30)
               }}
             >
               {text.demoTrack}
