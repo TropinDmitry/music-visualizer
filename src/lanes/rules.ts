@@ -12,6 +12,11 @@ export const GOOD_WINDOW_SEC = 0.12
 export const SWIPE_EARLY_SEC = 0.04
 export const SWIPE_LATE_SEC = 0.3
 const SWIPE_PERFECT_LATE_SEC = 0.12
+/**
+ * Пробел тоже ждёт на чашах, как стрелка: на телефоне его берут касанием, и
+ * палец не должен гнаться за пролетающей плашкой. Нажать раньше можно, как обычную ноту.
+ */
+export const SPACE_LATE_SEC = SWIPE_LATE_SEC
 /** Со скольких промахов подряд игрока предупреждают. */
 export const MISS_WARNING_STREAK = 3
 
@@ -131,7 +136,8 @@ function earlyWindow(note: LaneNote): number {
 
 /** Насколько позже своего времени нота ещё ждёт нажатия. */
 export function lateWindow(note: LaneNote): number {
-  return note.kind === 'swipe' ? SWIPE_LATE_SEC : GOOD_WINDOW_SEC
+  if (note.kind === 'swipe') return SWIPE_LATE_SEC
+  return note.kind === 'space' ? SPACE_LATE_SEC : GOOD_WINDOW_SEC
 }
 
 /** Есть ли сейчас пробел, который можно нажать. На телефоне тогда любое касание идёт в пробел. */
@@ -139,7 +145,9 @@ export function isSpaceDue(game: LaneGame, time: number): boolean {
   for (let i = game.firstNote; i < game.notes.length; i++) {
     const note = game.notes[i]
     if (note.time - time > GOOD_WINDOW_SEC) break
-    if (note.kind === 'space' && !game.judged.has(note.id) && time - note.time <= GOOD_WINDOW_SEC) return true
+    const late = time - note.time
+    const isOpen = late >= -earlyWindow(note) && late <= lateWindow(note)
+    if (note.kind === 'space' && !game.judged.has(note.id) && isOpen) return true
   }
   return false
 }
@@ -276,7 +284,11 @@ function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => bo
   if (nearest.kind === 'hold') game.holds[nearest.lane] = { note: nearest, scoredUntil: nearest.time }
   // У стрелки точное попадание с момента касания чаши и пока она на ней тормозит
   const late = time - nearest.time
-  const isPerfect = nearest.kind === 'swipe' ? late <= SWIPE_PERFECT_LATE_SEC : nearestError <= PERFECT_WINDOW_SEC
+  // Пробел ждёт на чашах, как стрелка: точно и в начале этого ожидания
+  const isPerfect =
+    nearest.kind === 'swipe'
+      ? late <= SWIPE_PERFECT_LATE_SEC
+      : nearestError <= PERFECT_WINDOW_SEC || (nearest.kind === 'space' && late >= 0 && late <= SWIPE_PERFECT_LATE_SEC)
   const isSpecial = nearest.kind === 'star' || nearest.kind === 'accent' || nearest.kind === 'space'
   const overdriveBonus = isOverdrive(game, nearest.time) ? OVERDRIVE_BONUS : 1
   const bonus = isSpecial ? STAR_BONUS : nearest.kind === 'swipe' ? ARROW_BONUS : 1

@@ -1519,8 +1519,8 @@ export class LaneScene {
       if (remaining > approachSec) break
       if (judged.has(note.id)) continue
 
-      const isArrow = note.kind === 'swipe'
-      // Стрелка не пролетает чашу: доходит до неё и тормозит, пока её ещё можно отбить
+      // Стрелка и пробел не пролетают чашу: доходят до неё и тормозят, пока их ещё можно взять
+      const isArrow = note.kind === 'swipe' || note.kind === 'space'
       const closeness = this.closenessAt(isArrow ? arrowRemaining(remaining) : remaining, approachSec)
       const spacing = this.spacingAt(closeness)
       const x = (note.lane - 1) * spacing
@@ -1536,7 +1536,9 @@ export class LaneScene {
         if (spaceCount < MAX_SPACE_BARS) {
           const bar = this.spaceBars[spaceCount]
           bar.position.set(0, y, 0)
-          bar.scale.set(spacing * SPACE_BAR_WIDTH, spacing * SPACE_BAR_DEPTH, 1)
+          // Залежавшаяся на чашах плашка к концу ожидания чуть сжимается, как стрелка
+          const shrink = 1 - 0.3 * fading
+          bar.scale.set(spacing * SPACE_BAR_WIDTH * shrink, spacing * SPACE_BAR_DEPTH * shrink, 1)
           bar.visible = true
           spaceCount += 1
         }

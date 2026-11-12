@@ -12,6 +12,7 @@ import {
   GOOD_WINDOW_SEC,
   SWIPE_EARLY_SEC,
   SWIPE_LATE_SEC,
+  isSpaceDue,
   MISS_WARNING_STREAK,
   multiplier,
   multiplierProgress,
@@ -604,6 +605,18 @@ describe('правила', () => {
     const game = createLaneGame(notes, easy)
     expect(pressLane(game, 1, 1)).toBeNull()
     expect(pressSpace(game, 1)?.points).toBe(500)
+  })
+
+  it('пробел ждёт на чашах, как стрелка, а потом засчитывается промахом', () => {
+    const notes: LaneNote[] = [{ id: 0, time: 1, lane: 1, kind: 'space', direction: 0 }]
+    const waiting = createLaneGame(notes, easy)
+    expect(isSpaceDue(waiting, 1.25)).toBe(true)
+    expect(stepLanes(waiting, 1.25)).toEqual([])
+    expect(pressSpace(waiting, 1.25)?.type).toBe('good')
+
+    const late = createLaneGame(notes, easy)
+    expect(isSpaceDue(late, 1.4)).toBe(false)
+    expect(stepLanes(late, 1.4).map((event) => event.type)).toEqual(['miss'])
   })
 
   it('три звезды включают суперрежим с удвоенными очками', () => {
