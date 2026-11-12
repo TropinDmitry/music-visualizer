@@ -113,6 +113,8 @@ interface ActiveTouch {
   lane: number
   startX: number
   startY: number
+  /** Игровое время касания: на него засчитывается смахивание. */
+  startTime: number | null
   hasSwiped: boolean
 }
 
@@ -141,7 +143,7 @@ const VIDEO_MAX_DRIFT_SEC = 0.15
 const LOW_ENERGY = 0.3
 /** Цвет дорожек по силе части песни: тихое холоднее, мощное теплее. */
 /** Сдвиг пальца, после которого касание считается смахиванием. */
-const SWIPE_MIN_PX = 28
+const SWIPE_MIN_PX = 18
 /** Какая доля экрана сверху на телефоне работает как пробел. */
 const SPACE_TOUCH_ZONE = 0.5
 /** На сколько радиан поворачивается оттенок клипа от начала песни до конца. */
@@ -629,8 +631,9 @@ export function LanesApp() {
       sceneRef.current?.pressEffect(lane)
       if (time !== null && game) eventHandlerRef.current(pressLane(game, time, lane))
     },
-    swipe(direction: number) {
-      const time = playingTime()
+    /** at — игровое время, на которое засчитать смахивание, если оно известно заранее. */
+    swipe(direction: number | null, at?: number) {
+      const time = at ?? playingTime()
       const game = gameRef.current
       if (time !== null && game) eventHandlerRef.current(pressSwipe(game, time, direction))
     },
@@ -706,20 +709,34 @@ export function LanesApp() {
     }
     const x = (event.clientX - (box.left + box.width / 2)) / (box.height / 2)
     const lane = scene.laneAt(x)
-    touchesRef.current.set(event.pointerId, { lane, startX: event.clientX, startY: event.clientY, hasSwiped: false })
+    touchesRef.current.set(event.pointerId, {
+      lane,
+      startX: event.clientX,
+      startY: event.clientY,
+      startTime: time,
+      hasSwiped: false,
+    })
     pressedLanesRef.current[lane] = true
     handlersRef.current.lane(lane)
   }
 
-  /** Смахивание отбивает стрелку: на телефоне нет клавиш ← ↑ →. */
+  /**
+   * Смахивание отбивает стрелку: на телефоне нет клавиш ← ↑ →. Пальцем смахивают
+   * в любую сторону, а засчитывается оно на момент касания: сам жест занимает
+   * десятую долю секунды, и без этого стрелка всегда шла бы с опозданием.
+   */
   const handlePointerMove = (event: PointerEvent) => {
     const touch = touchesRef.current.get(event.pointerId)
     if (!touch || touch.hasSwiped) return
     const sideways = event.clientX - touch.startX
-    const upward = touch.startY - event.clientY
-    if (Math.max(Math.abs(sideways), upward) < SWIPE_MIN_PX) return
+    const vertical = touch.startY - event.clientY
+    if (Math.hypot(sideways, vertical) < SWIPE_MIN_PX) return
     touch.hasSwiped = true
-    handlersRef.current.swipe(upward > Math.abs(sideways) ? 0 : Math.sign(sideways))
+    if (event.pointerType === 'touch') {
+      handlersRef.current.swipe(null, touch.startTime ?? undefined)
+      return
+    }
+    handlersRef.current.swipe(vertical > Math.abs(sideways) ? 0 : Math.sign(sideways))
   }
 
   const handlePointerUp = (event: PointerEvent) => {

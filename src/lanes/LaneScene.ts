@@ -42,6 +42,11 @@ const VANISH_Y = 0.94
 const HIT_Y = -0.68
 /** Расстояние между центрами дорожек на линии нажатия. */
 const LANE_SPREAD = 0.62
+/** Экран уже этого считается вертикальным, телефонным. */
+const PORTRAIT_ASPECT = 0.8
+/** На вертикальном экране центры крайних дорожек на этой доле от середины до края. */
+const PORTRAIT_SPREAD_SHARE = 0.62
+const PORTRAIT_SIZE_BOOST = 1.25
 /** Расстояние между дорожками в пучке наверху. */
 const LANE_BUNDLE = 0.05
 /** Степень изгиба: чем больше, тем дольше дорожки идут вместе. */
@@ -881,6 +886,8 @@ export class LaneScene {
   private nextShockwave = 0
   private nextArrow = 0
   private spread = LANE_SPREAD
+  /** Во сколько раз чаши и ноты крупнее, чем при обычном расстоянии между дорожками. */
+  private sizeScale = 1
   private lastRenderAt = 0
 
   constructor(canvas: HTMLCanvasElement) {
@@ -1153,8 +1160,12 @@ export class LaneScene {
     this.camera.left = -aspect
     this.camera.right = aspect
     this.camera.updateProjectionMatrix()
-    // В узком окне веер сужается, чтобы крайние дорожки не уходили за экран
-    this.spread = Math.min(LANE_SPREAD, (aspect * 0.8) / 1.5)
+    // В узком окне веер сужается, чтобы крайние дорожки не уходили за экран.
+    // На вертикальном экране телефона дорожки раздвигаются до краёв, а чаши и ноты
+    // крупнее: палец толще курсора, и ловить мелкие цели неудобно
+    const isPortrait = aspect < PORTRAIT_ASPECT
+    this.spread = isPortrait ? aspect * PORTRAIT_SPREAD_SHARE : Math.min(LANE_SPREAD, (aspect * 0.8) / 1.5)
+    this.sizeScale = (this.spread / LANE_SPREAD) * (isPortrait ? PORTRAIT_SIZE_BOOST : 1)
     this.sharedUniforms.uSpread.value = this.spread
     this.sharedUniforms.uViewAspect.value = aspect
   }
@@ -1473,7 +1484,7 @@ export class LaneScene {
       target.squash += (restScale - target.squash) * spring
       target.jolt *= fade
       target.group.position.x = this.laneX(lane) + Math.sin(target.jolt * 18) * 0.03 * target.jolt
-      target.group.scale.setScalar(target.squash * (this.spread / LANE_SPREAD))
+      target.group.scale.setScalar(target.squash * this.sizeScale)
       const restLight = isHolding ? 1 : pressedLanes[lane] ? 0.85 : PLATFORM_IDLE_LIGHT
       target.light.opacity = Math.max(restLight, target.light.opacity * fade)
     }
@@ -1517,7 +1528,7 @@ export class LaneScene {
       // Размер зависит от расстояния между дорожками, поэтому в узком окне ноты меньше.
       // Залежавшаяся на чаше стрелка к концу своего окна чуть сжимается: скоро исчезнет
       const fading = isArrow ? Math.min(1, Math.max(0, (-remaining - SWIPE_LATE_SEC * 0.6) / (SWIPE_LATE_SEC * 0.4))) : 0
-      const size = NOTE_SIZE * (spacing / LANE_SPREAD) * (1 - 0.3 * fading)
+      const size = NOTE_SIZE * (spacing / LANE_SPREAD) * (this.sizeScale / (this.spread / LANE_SPREAD)) * (1 - 0.3 * fading)
       const fresh = (remaining / approachSec - (1 - NOTE_REVEAL_SHARE)) / NOTE_REVEAL_SHARE
       const reveal = 1 - THREE.MathUtils.smoothstep(fresh, 0, 1)
 
@@ -1632,7 +1643,7 @@ export class LaneScene {
       if (reveal) reveal.needsUpdate = true
     }
     // Горизонт дышит с битом и сужается вместе с дорожками в узком окне
-    const gateWidth = (this.spread / LANE_SPREAD) * (0.34 + 0.05 * this.sharedUniforms.uBeat.value)
+    const gateWidth = this.sizeScale * (0.34 + 0.05 * this.sharedUniforms.uBeat.value)
     this.gate.scale.set(gateWidth, gateWidth * 0.42, 1)
     this.gate.material.opacity = 0.7 + 0.3 * this.sharedUniforms.uBeat.value
     this.helper.rotation.order = 'XYZ' // искры и волны ждут обычный порядок поворотов
@@ -1703,7 +1714,7 @@ export class LaneScene {
       const rise = arrow.direction === 0 ? flight * 3.2 : 0
       arrow.mesh.position.set(arrow.startX + arrow.direction * flight * 3.2, HIT_Y + rise, 0.1)
       arrow.mesh.rotation.set(NOTE_TILT, arrowHeading(arrow.direction), 0)
-      arrow.mesh.scale.setScalar(NOTE_SIZE * ARROW_IN_COIN * (this.spread / LANE_SPREAD) * (1 + 0.9 * age))
+      arrow.mesh.scale.setScalar(NOTE_SIZE * ARROW_IN_COIN * this.sizeScale * (1 + 0.9 * age))
       arrow.mesh.material.uniforms.uOpacity.value = 1 - age * age
     }
   }
@@ -1828,7 +1839,7 @@ export class LaneScene {
         wave.mesh.material.opacity = 0
         continue
       }
-      const waveSize = (0.17 + 0.3 * age) * (this.spread / LANE_SPREAD)
+      const waveSize = (0.17 + 0.3 * age) * this.sizeScale
       wave.mesh.scale.set(waveSize, waveSize * PLANE_SQUASH, 1)
       wave.mesh.material.opacity = 1 - age
     }

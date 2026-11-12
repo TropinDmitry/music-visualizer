@@ -246,9 +246,12 @@ export function pressSpace(game: LaneGame, time: number): LaneEvent | null {
   return judgeNearest(game, time, (note) => note.kind === 'space')
 }
 
-/** Стрелка: важно только направление, -1 влево, 1 вправо, 0 вверх. */
-export function pressSwipe(game: LaneGame, time: number, direction: number): LaneEvent | null {
-  return judgeNearest(game, time, (note) => note.kind === 'swipe' && note.direction === direction)
+/**
+ * Стрелка: важно только направление, -1 влево, 1 вправо, 0 вверх. null — любое:
+ * на телефоне направление и так задано дорожкой стрелки, смахнуть можно куда удобно.
+ */
+export function pressSwipe(game: LaneGame, time: number, direction: number | null): LaneEvent | null {
+  return judgeNearest(game, time, (note) => note.kind === 'swipe' && (direction === null || note.direction === direction))
 }
 
 function judgeNearest(game: LaneGame, time: number, fits: (note: LaneNote) => boolean): LaneEvent | null {

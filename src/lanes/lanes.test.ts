@@ -649,6 +649,13 @@ describe('правила', () => {
     expect(event?.direction).toBe(1)
   })
 
+  it('на телефоне смахивание в любую сторону отбивает стрелку на чаше', () => {
+    const game = createLaneGame(level, easy)
+    const event = pressSwipe(game, 2, null)
+    expect(event?.kind).toBe('swipe')
+    expect(event?.direction).toBe(1)
+  })
+
   it('свайп проверяет направление', () => {
     const game = createLaneGame(level, easy)
     expect(pressSwipe(game, 2, -1)).toBeNull()
