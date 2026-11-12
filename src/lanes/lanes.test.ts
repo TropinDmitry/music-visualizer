@@ -86,6 +86,18 @@ describe('generateLaneLevel', () => {
     expect(around.length).toBeGreaterThan(0)
   })
 
+  it('серия стрелок идёт подряд, без обычных нот внутри и вплотную после', () => {
+    const notes = generateLaneLevel(analysis, hard)
+    const swipes = notes.filter((note) => note.kind === 'swipe')
+    expect(swipes.length).toBeGreaterThan(0)
+    for (const swipe of swipes) {
+      const crowding = notes.filter(
+        (note) => (note.kind === 'tap' || note.kind === 'star') && note.time > swipe.time && note.time - swipe.time < 0.3,
+      )
+      expect(crowding).toEqual([])
+    }
+  })
+
   it('есть стрелки во все три стороны', () => {
     const relaxed = new Float32Array(44100 * 40)
     for (let time = 2; time < 38; time += 0.9) {
@@ -379,8 +391,9 @@ describe('драматургия песни', () => {
       return lane === note.lane || lane === 2 - note.lane
     })
     expect(sameTime.length / middle.length).toBeGreaterThanOrEqual(0.8)
-    // Пары ставятся по чёткости удара и иногда меняют дорожку второй ноты в одном из повторов
-    expect(sameShape.length / plainPairs.length).toBeGreaterThanOrEqual(0.85)
+    // Пары ставятся по чёткости удара, а вокруг серии стрелок ноты убираются: это бывает
+    // только в одном из повторов, поэтому полного совпадения нет
+    expect(sameShape.length / plainPairs.length).toBeGreaterThanOrEqual(0.8)
   })
 })
 

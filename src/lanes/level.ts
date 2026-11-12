@@ -239,8 +239,14 @@ const ARROW_MIN_SPACING_SEC = 0.2
 /** С чем сравниваем удар, чтобы понять, выделяется ли он. */
 const ARROW_CONTRAST_SEC = 0.5
 const ARROW_CONTRAST_FLOOR = 0.02
-/** Совсем вплотную к стрелке обычную ноту не сыграть: руке надо перейти на стрелки. */
-const ARROW_CLEAR_SEC = 0.12
+/**
+ * Перед серией стрелок и после неё обычных нот нет: руке надо перейти на стрелки
+ * и обратно. После серии место дольше: последняя стрелка ещё ждёт на чаше.
+ */
+const ARROW_BEFORE_SEC = 0.2
+/** Соседняя нота продолжает серию стрелок, если она хотя бы такой доли силы самого сильного удара. */
+const ARROW_JOIN_SHARE = 0.3
+const ARROW_AFTER_SEC = 0.3
 /** Парные ноты на смене ритма не чаще этого: иначе акценты теряют вес. */
 const MIN_ACCENT_GAP_SEC = 12
 /** Смену части ищем рядом с найденным событием, чтобы попасть в реальный удар. */
@@ -529,6 +535,7 @@ function placeArrowAccents(
   }
 
   const arrows = new Set<LaneNote>()
+  const runs: { from: number; to: number }[] = []
   // Сколько раз уже стрелка шла с каждой дорожки: повторы ставят сильные доли на одни
   // и те же дорожки, и без этого стрелки шли бы всё время в одну сторону
   const usedLanes = [0, 0, 0]
@@ -561,22 +568,51 @@ function placeArrowAccents(
       )
     }
     strong.sort((a, b) => score(b) - score(a))
+    if (strong.length === 0) continue
 
-    const chosen: LaneNote[] = []
-    for (const note of strong) {
-      if (chosen.length >= difficulty.arrowRun) break
-      if (chosen.every((other) => Math.abs(other.time - note.time) >= ARROW_MIN_SPACING_SEC)) chosen.push(note)
+    // Серия растёт от самого сильного удара соседними нотами подряд, в ту сторону,
+    // где удар сильнее. Так внутри серии нет обычных нот и вычищать ничего не надо
+    const first = strong[0]
+    const chosen: LaneNote[] = [first]
+    const canJoin = (note: LaneNote | undefined): note is LaneNote =>
+      note !== undefined &&
+      note.kind === 'tap' &&
+      isFitting(note) &&
+      Math.abs(note.time - first.time) <= ARROW_WINDOW_SEC / 2 &&
+      strengthOf(note) >= strongest * ARROW_JOIN_SHARE
+    let left = notes.indexOf(first) - 1
+    let right = notes.indexOf(first) + 1
+    while (chosen.length < difficulty.arrowRun) {
+      const before = notes[left]
+      const after = notes[right]
+      const canTakeBefore = canJoin(before) && chosen[0].time - before.time >= ARROW_MIN_SPACING_SEC
+      const canTakeAfter = canJoin(after) && after.time - chosen[chosen.length - 1].time >= ARROW_MIN_SPACING_SEC
+      if (!canTakeBefore && !canTakeAfter) break
+      if (canTakeAfter && (!canTakeBefore || strengthOf(after) >= strengthOf(before))) {
+        chosen.push(after)
+        right += 1
+      } else {
+        chosen.unshift(before)
+        left -= 1
+      }
     }
     for (const note of chosen) {
       arrows.add(note)
       usedLanes[note.lane] += 1
     }
+    if (chosen.length > 0) {
+      const times = chosen.map((note) => note.time)
+      runs.push({ from: Math.min(...times), to: Math.max(...times) })
+    }
   }
 
+  // Серия стрелок играется подряд, без обычных нот внутри: «стрелка, нота, стрелка»
+  // заставляет менять жест каждые пару десятых секунды. Вокруг серии место, чтобы
+  // перейти на стрелки и обратно; после серии дольше, пока последняя ждёт на чаше
+  const isNearRun = (time: number) => runs.some((run) => time > run.from - ARROW_BEFORE_SEC && time < run.to + ARROW_AFTER_SEC)
   const result: LaneNote[] = []
   for (const note of notes) {
-    const isCrowding = !arrows.has(note) && [...arrows].some((arrow) => Math.abs(arrow.time - note.time) < ARROW_CLEAR_SEC)
-    if (isCrowding) continue
+    if (!arrows.has(note) && isNearRun(note.time)) continue
     result.push(arrows.has(note) ? { ...note, kind: 'swipe', direction: arrowDirection(note.lane) } : note)
   }
   return result
